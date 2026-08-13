@@ -1,0 +1,117 @@
+name: "[TIP] - FTP Sync"
+version: 0.1.0
+description: Sync user/pages and the active theme between local and hosting over FTP/FTPS, with conflict detection and automatic backup before overwriting.
+icon: exchange
+author:
+  name: tipforeveryone
+keywords: sync, ftp, deploy, pages, theme
+license: MIT
+
+dependencies:
+  - { name: grav, version: '>=1.7.0' }
+  - { name: admin }
+
+form:
+  validation: loose
+  fields:
+    enabled:
+      type: toggle
+      label: Plugin status
+      highlight: 1
+      default: 1
+      options:
+        1: Enabled
+        0: Disabled
+      validate:
+        type: bool
+
+    force_allow_remote:
+      type: toggle
+      label: Allow running even when not detected as local
+      help: 'By default the plugin only allows "Sync now" when it detects it is running in a local environment (DDEV). Enable this to skip that check (NOT recommended).'
+      default: 0
+      options:
+        1: Enabled
+        0: Disabled
+      validate:
+        type: bool
+
+    backup_enabled:
+      type: toggle
+      label: Auto-backup before overwriting
+      highlight: 1
+      default: 1
+      options:
+        1: Enabled
+        0: Disabled
+      validate:
+        type: bool
+
+    remote_base_path:
+      type: text
+      label: Root directory on hosting
+      help: 'Absolute FTP path matching the site webroot, e.g. /public_html'
+      default: '/'
+      validate:
+        required: true
+
+    sync_plugins:
+      type: text
+      label: Plugins to sync
+      help: 'Comma-separated list of plugin names (in user/plugins/) to sync, e.g. admin-quick-menu,in-place-edit-button,ftp-sync. Leave EMPTY to sync every plugin under user/plugins/ instead of a specific list. (Themes are auto-detected from the site''s active theme — no need to declare them here, this field does not apply to themes.)'
+      default: ''
+      validate:
+        type: commalist
+
+    ignore_patterns:
+      type: text
+      label: File/folder patterns to skip when syncing
+      help: 'Comma-separated, supports the * wildcard (e.g. .git,cache,.ddev,node_modules,*.zip). Sensitive files under user/config (security.yaml, security-private.php, versions.yaml) and this plugin''s own config file (ftp-sync.yaml) are blocked by default to avoid leaking/overwriting the FTP password.'
+      default: '.git,cache,.ddev,node_modules,*.zip,.DS_Store,Thumbs.db,security.yaml,security-private.php,versions.yaml,ftp-sync.yaml'
+      validate:
+        type: commalist
+
+    ftp.host:
+      type: text
+      label: FTP Host
+      validate:
+        required: true
+
+    ftp.port:
+      type: text
+      label: FTP Port
+      default: 21
+      validate:
+        type: number
+        required: true
+
+    ftp.username:
+      type: text
+      label: FTP Username
+      validate:
+        required: true
+
+    ftp.password:
+      type: password
+      label: FTP Password
+      help: 'Stored in plaintext in the config — only use this on internal/trusted sites.'
+
+    ftp.ssl:
+      type: toggle
+      label: Use FTPS (FTP over SSL)
+      default: 0
+      options:
+        1: Enabled
+        0: Disabled
+      validate:
+        type: bool
+
+    ftp.passive:
+      type: toggle
+      label: Passive mode
+      default: 1
+      options:
+        1: Enabled
+        0: Disabled
+      validate:
+        type: bool

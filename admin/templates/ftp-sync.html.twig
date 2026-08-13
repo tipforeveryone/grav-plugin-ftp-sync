@@ -1,0 +1,884 @@
+{% extends 'partials/base.html.twig' %}
+
+{% block titlebar %}
+    <div class="button-bar">
+        <a class="button" href="{{ base_url }}"><i class="fa fa-reply"></i> {{ "PLUGIN_ADMIN.BACK"|t }}</a>
+    </div>
+    <h1><i class="fa fa-fw fa-exchange"></i> Sync Pages &amp; Theme (FTP)</h1>
+{% endblock %}
+
+{% block content %}
+<div id="ftp-sync-app" data-ajax-url="{{ current_url }}.json" data-nonce="{{ admin.getNonce() }}" data-is-local="{{ ftp_sync_is_local() ? '1' : '0' }}">
+
+    <style>
+        #ftp-sync-app { overflow: hidden; padding-bottom: 3rem; }
+
+        #ftp-sync-app .sc-kinds {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin: 1rem 0 0;
+            padding: 0;
+        }
+        #ftp-sync-app .sc-kinds-title {
+            font-weight: 700;
+            margin-bottom: 0.2rem;
+        }
+        #ftp-sync-app .sc-kind-row {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            cursor: pointer;
+            font-weight: normal;
+            margin: 0;
+        }
+        #ftp-sync-app .sc-kind-row input[type="checkbox"] {
+            margin: 0;
+            flex: 0 0 auto;
+        }
+        #ftp-sync-app .sc-kind-name {
+            flex: 0 0 6rem;
+            font-weight: 600;
+        }
+        #ftp-sync-app .sc-kind-desc {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        #ftp-sync-app .sc-toolbar {
+            display: flex;
+            justify-content: center;
+            gap: 0.75rem;
+            margin: 0 0 1.5rem;
+        }
+
+        #ftp-sync-app #sc-status:not(:empty) { margin-bottom: 1rem; }
+
+        #ftp-sync-app #sc-force-push-all {
+            background: #c9544a;
+            color: #fff;
+            border-color: #a83a32;
+        }
+        #ftp-sync-app #sc-force-push-all:hover { background: #a83a32; }
+
+        #ftp-sync-app .sc-modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #ftp-sync-app .sc-modal-box {
+            background: #fff;
+            border-radius: 6px;
+            max-width: 32rem;
+            width: 90%;
+            padding: 1.5rem;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+        }
+        #ftp-sync-app .sc-modal-title {
+            font-weight: 700;
+            color: #a83a32;
+            margin-bottom: 0.8rem;
+            font-size: 1.05rem;
+        }
+        #ftp-sync-app .sc-modal-desc {
+            color: #444;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin: 0 0 0.8rem;
+        }
+        #ftp-sync-app .sc-modal-question {
+            font-weight: 600;
+            margin: 0 0 1.2rem;
+        }
+        #ftp-sync-app .sc-modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.75rem;
+        }
+        #ftp-sync-app #sc-confirm-yes {
+            background: #c9544a;
+            color: #fff;
+            border-color: #a83a32;
+        }
+        #ftp-sync-app #sc-confirm-yes:hover { background: #a83a32; }
+
+        #ftp-sync-app .sc-filters,
+        #ftp-sync-app .sc-bulk {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 1.2rem;
+            margin-bottom: 1rem;
+            padding: 0.6rem 0.8rem;
+            background: #f7f7f7;
+            border: 1px solid #e6e6e6;
+            border-radius: 4px;
+        }
+        #ftp-sync-app .sc-filter-item,
+        #ftp-sync-app .sc-bulk-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            height: 2.4rem;
+        }
+        #ftp-sync-app .sc-filters select,
+        #ftp-sync-app .sc-bulk select {
+            height: 2.4rem;
+            line-height: 2.4rem;
+            margin: 0;
+            box-sizing: border-box;
+        }
+        #ftp-sync-app .sc-filter-label,
+        #ftp-sync-app .sc-bulk-label {
+            display: inline-flex;
+            align-items: center;
+            height: 2.4rem;
+            font-weight: 600;
+            color: #555;
+            white-space: nowrap;
+        }
+        #ftp-sync-app .sc-filters .button,
+        #ftp-sync-app .sc-bulk .button {
+            height: 2.4rem;
+            box-sizing: border-box;
+        }
+
+        /*
+         * The admin theme renders <table class="overview-list"> with flexbox
+         * (tr { display:flex }, td/th { display:block; flex:1 }) — it is NOT
+         * a real table layout, so CSS `width` on td/th has no effect. Use
+         * `flex: 0 0 <rem>` (fixed, no grow) for the narrow columns, so the
+         * File column (keeps the theme's default flex:1) stretches to fill
+         * the remaining space.
+         */
+        #ftp-sync-app table.overview-list td.sc-col-checkbox,
+        #ftp-sync-app table.overview-list th.sc-col-checkbox {
+            flex: 0 0 1.6rem;
+            padding-left: 0.4rem;
+            padding-right: 0.4rem;
+            text-align: center;
+        }
+        #ftp-sync-app table.overview-list td.sc-col-status,
+        #ftp-sync-app table.overview-list th.sc-col-status {
+            flex: 0 0 5rem;
+            text-align: center;
+        }
+        #ftp-sync-app table.overview-list td.sc-col-action,
+        #ftp-sync-app table.overview-list th.sc-col-action {
+            flex: 0 0 11rem;
+        }
+        #ftp-sync-app table.overview-list td.sc-col-backup-meta,
+        #ftp-sync-app table.overview-list th.sc-col-backup-meta {
+            flex: 0 0 10rem;
+            text-align: center;
+        }
+        #ftp-sync-app table.overview-list td.sc-col-backup-action,
+        #ftp-sync-app table.overview-list th.sc-col-backup-action {
+            flex: 0 0 3rem;
+            text-align: center;
+        }
+        #ftp-sync-app table.overview-list td.sc-col-action {
+            display: flex;
+            align-items: center;
+        }
+        #ftp-sync-app table.overview-list td,
+        #ftp-sync-app table.overview-list th {
+            word-break: break-word;
+            padding-top: 0.35rem;
+            padding-bottom: 0.35rem;
+        }
+        #ftp-sync-app table.overview-list tbody tr:nth-child(even) {
+            background: #f5f5f5;
+        }
+        #ftp-sync-app .sc-status-conflict { color: #d9534f; font-weight: 600; }
+        #ftp-sync-app .sc-status-x { color: #2c5; font-weight: 700; }
+        #ftp-sync-app .sc-status-newer { background: #e3f1fc; color: #1f6fb2; font-weight: 600; }
+        #ftp-sync-app .sc-status-older { background: #fbe9d6; color: #c87f0a; font-weight: 600; }
+
+        #ftp-sync-app .sc-backup-location {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+            padding: 0.5rem 0.8rem;
+            background: #f7f7f7;
+            border: 1px solid #e6e6e6;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            color: #555;
+        }
+
+        /* Shared style for every combobox on the page: action column + filters + bulk action above. */
+        #ftp-sync-app select.sc-resolution,
+        #ftp-sync-app .sc-filters select,
+        #ftp-sync-app .sc-bulk select {
+            margin: 0;
+            box-sizing: border-box;
+            padding: 0 0.6rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            cursor: pointer;
+            transition: border-color 0.15s ease;
+        }
+        #ftp-sync-app select.sc-resolution:hover,
+        #ftp-sync-app .sc-filters select:hover,
+        #ftp-sync-app .sc-bulk select:hover {
+            border-color: #999;
+        }
+        #ftp-sync-app select.sc-resolution:focus,
+        #ftp-sync-app .sc-filters select:focus,
+        #ftp-sync-app .sc-bulk select:focus {
+            border-color: #4d90fe;
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(77, 144, 254, 0.2);
+        }
+        #ftp-sync-app select.sc-resolution {
+            width: 100%;
+            height: 2.2rem;
+            line-height: 2.2rem;
+        }
+    </style>
+
+    {% if ftp_sync_is_enabled() %}
+    <div class="notices">
+        <p>Diff is based on <b>mtime + size</b> over FTP (no hashing). On the first run (no baseline yet),
+        every file that differs between local &amp; hosting shows up as <b>"Conflict"</b> so you can resolve it
+        manually once; from then on the plugin infers the sync direction automatically. Before overwriting or
+        deleting any file, the previous version is automatically zipped into <code>user/data/ftp-sync/backups/</code>.</p>
+
+        <div class="sc-kinds">
+            <div class="sc-kinds-title">Sync</div>
+            <label class="sc-kind-row">
+                <input type="checkbox" class="sc-kind" value="pages" checked>
+                <span class="sc-kind-name">Pages</span>
+                <span class="sc-kind-desc">user/pages (all page content)</span>
+            </label>
+            <label class="sc-kind-row">
+                <input type="checkbox" class="sc-kind" value="themes" checked>
+                <span class="sc-kind-name">Themes</span>
+                <span class="sc-kind-desc">The site's active theme (auto-detected, not configured manually)</span>
+            </label>
+            <label class="sc-kind-row">
+                <input type="checkbox" class="sc-kind" value="plugins" checked>
+                <span class="sc-kind-name">Plugins</span>
+                <span class="sc-kind-desc">Plugins listed in the config, or every plugin under user/plugins/ if that list is left empty</span>
+            </label>
+            <label class="sc-kind-row">
+                <input type="checkbox" class="sc-kind" value="config" checked>
+                <span class="sc-kind-name">Config</span>
+                <span class="sc-kind-desc">user/config (excluding sensitive files such as the FTP password)</span>
+            </label>
+            <label class="sc-kind-row">
+                <input type="checkbox" class="sc-kind" value="accounts" checked>
+                <span class="sc-kind-name">Accounts</span>
+                <span class="sc-kind-desc">user/accounts (Admin login accounts)</span>
+            </label>
+        </div>
+    </div>
+
+    <div class="sc-toolbar">
+        <button type="button" class="button" id="sc-check-diff"><i class="fa fa-refresh"></i> Check differences</button>
+        <button type="button" class="button primary" id="sc-sync-now" disabled>
+            <i class="fa fa-cloud-upload"></i> Sync now
+        </button>
+        <button type="button" class="button" id="sc-force-push-all"
+                title="Delete all files currently on Hosting (within the checked categories above), then upload everything from Local.">
+            <i class="fa fa-warning"></i> Upload all Local to Hosting
+        </button>
+        <button type="button" class="button" id="sc-show-backups">
+            <i class="fa fa-archive"></i> Show backups
+        </button>
+    </div>
+
+    <div id="sc-backups" style="display:none">
+        <div class="sc-backup-location">
+            <span>Backup folder: <code>{{ ftp_sync_backup_path() }}</code> (relative to the project root)</span>
+            <button type="button" class="button" id="sc-copy-backup-path" data-path="{{ ftp_sync_backup_path() }}">
+                <i class="fa fa-clipboard"></i> Copy location
+            </button>
+        </div>
+        <table id="sc-backups-table" class="overview-list">
+            <thead>
+                <tr>
+                    <th>File name</th>
+                    <th class="sc-col-backup-meta">Size</th>
+                    <th class="sc-col-backup-meta">Created</th>
+                    <th class="sc-col-backup-action"></th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div id="sc-local-warning" class="notices error" style="display:none">
+        This does not look like a local environment (no .ddev/ folder found) — "Sync now" / "Upload all" are locked.
+        Enable <code>force_allow_remote</code> in the plugin config if you really want to skip this check.
+    </div>
+
+    <div id="sc-status"></div>
+
+    <div id="sc-confirm-modal" class="sc-modal-overlay" style="display:none">
+        <div class="sc-modal-box">
+            <div class="sc-modal-title"><i class="fa fa-exclamation-triangle"></i> Confirm: upload all Local to Hosting</div>
+            <p class="sc-modal-desc">
+                This will <b>DELETE ALL</b> files currently on Hosting (within the categories you have checked: Pages/Themes/Plugins/Config/Accounts),
+                then upload everything from Local to replace them. Anything that only exists on Hosting (and not on Local) will be lost —
+                the system will back up the Hosting copy before deleting, but you should still make sure Local is the correct version.
+            </p>
+            <p class="sc-modal-question">Are you sure you want to continue?</p>
+            <div class="sc-modal-actions">
+                <button type="button" class="button" id="sc-confirm-yes">Yes, upload</button>
+                <button type="button" class="button" id="sc-confirm-no">No</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="sc-results" style="display:none">
+        <div class="sc-filters">
+            <div class="sc-filter-item">
+                <span class="sc-filter-label">Category:</span>
+                <select id="sc-filter-kind">
+                    <option value="">All</option>
+                    <option value="pages">Pages</option>
+                    <option value="themes">Themes</option>
+                    <option value="plugins">Plugins</option>
+                    <option value="config">Config</option>
+                    <option value="accounts">Accounts</option>
+                </select>
+            </div>
+            <div class="sc-filter-item">
+                <span class="sc-filter-label">Status:</span>
+                <select id="sc-filter-status">
+                    <option value="">All</option>
+                    <option value="conflict">Conflict</option>
+                    <option value="local_only">Local only</option>
+                    <option value="host_only">Hosting only</option>
+                </select>
+            </div>
+            <button type="button" class="button" id="sc-filter-apply">Apply filter</button>
+        </div>
+
+        <div class="sc-bulk">
+            <div class="sc-bulk-item">
+                <span class="sc-bulk-label">Apply to selected rows:</span>
+                <select id="sc-bulk-action">
+                    <option value="local">Use Local version</option>
+                    <option value="remote">Use Hosting version</option>
+                    <option value="">No action</option>
+                    <option value="delete_local">Delete on Local</option>
+                    <option value="delete_remote">Delete on Hosting</option>
+                </select>
+            </div>
+            <button type="button" class="button" id="sc-bulk-apply">Apply</button>
+        </div>
+
+        <table id="sc-diff-table" class="overview-list">
+            <thead>
+                <tr>
+                    <th class="sc-col-checkbox"><input type="checkbox" id="sc-select-all"></th>
+                    <th>File</th>
+                    <th class="sc-col-status">Local</th>
+                    <th class="sc-col-status">Host</th>
+                    <th class="sc-col-action">Action</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="notices error">
+        <p><i class="fa fa-exclamation-triangle"></i> <b>FTP Sync is disabled.</b>
+        This does not look like a local development environment (no <code>.ddev/</code> folder found at the webroot),
+        so every FTP Sync action — checking differences, syncing, uploading, and managing backups — is turned off here.
+        This is intentional: FTP credentials should never be exercised from a live hosting deployment of this plugin.</p>
+        <p>If this really is a local environment and the check is wrong, enable <code>force_allow_remote</code> in the plugin's config.</p>
+    </div>
+    {% endif %}
+</div>
+
+{% if ftp_sync_is_enabled() %}
+<script>
+(function () {
+    var app = document.getElementById('ftp-sync-app');
+    if (!app) { return; }
+
+    var ajaxUrl = app.dataset.ajaxUrl;
+    var nonce = app.dataset.nonce;
+    var isLocal = app.dataset.isLocal === '1';
+
+    var checkBtn = document.getElementById('sc-check-diff');
+    var syncBtn = document.getElementById('sc-sync-now');
+    var forcePushBtn = document.getElementById('sc-force-push-all');
+    var statusEl = document.getElementById('sc-status');
+    var results = document.getElementById('sc-results');
+    var table = document.getElementById('sc-diff-table');
+    var tbody = table.querySelector('tbody');
+    var localWarning = document.getElementById('sc-local-warning');
+    var kindCheckboxes = document.querySelectorAll('.sc-kind');
+    var filterKind = document.getElementById('sc-filter-kind');
+    var filterStatus = document.getElementById('sc-filter-status');
+    var filterApplyBtn = document.getElementById('sc-filter-apply');
+    var selectAll = document.getElementById('sc-select-all');
+    var bulkAction = document.getElementById('sc-bulk-action');
+    var bulkApplyBtn = document.getElementById('sc-bulk-apply');
+    var showBackupsBtn = document.getElementById('sc-show-backups');
+    var backupsBox = document.getElementById('sc-backups');
+    var backupsTbody = document.querySelector('#sc-backups-table tbody');
+
+    if (!isLocal) {
+        localWarning.style.display = '';
+        forcePushBtn.disabled = true;
+    }
+
+    var TYPE_LABELS = {
+        push: 'Push to Hosting',
+        pull: 'Pull to Local',
+        conflict: 'Conflict — changed on both sides',
+        deleted_local: 'Deleted on Local',
+        deleted_remote: 'Deleted on Hosting'
+    };
+
+    // Default select value per type: push/pull default to their natural
+    // direction (keeps the old automatic behavior if the user leaves it
+    // alone); conflict/deleted_* require an explicit choice (default ''
+    // = no action).
+    var DEFAULT_RESOLUTION = {
+        push: 'local',
+        pull: 'remote',
+        conflict: '',
+        deleted_local: '',
+        deleted_remote: ''
+    };
+
+    var RESOLUTION_OPTIONS = [
+        ['', 'No action'],
+        ['local', 'Use Local version'],
+        ['remote', 'Use Hosting version'],
+        ['delete_local', 'Delete on Local'],
+        ['delete_remote', 'Delete on Hosting']
+    ];
+
+    var lastRows = {};
+
+    function setStatus(message, isError) {
+        statusEl.textContent = message;
+        statusEl.className = isError ? 'notices error' : 'notices';
+    }
+
+    function post(task, extraFields) {
+        var fd = new FormData();
+        fd.append('task', task);
+        fd.append('admin-nonce', nonce);
+        (extraFields || []).forEach(function (pair) {
+            fd.append(pair[0], pair[1]);
+        });
+
+        return fetch(ajaxUrl, { method: 'POST', body: fd, credentials: 'same-origin' })
+            .then(function (res) { return res.json(); });
+    }
+
+    /** "pages/x.md" -> 'pages'; "config/x.yaml" -> 'config'; "theme:foo/x.css" -> 'themes'; "plugin:foo/x.php" -> 'plugins' */
+    function kindOfPath(path) {
+        var prefix = path.split('/')[0];
+        if (prefix === 'pages') { return 'pages'; }
+        if (prefix === 'config') { return 'config'; }
+        if (prefix === 'accounts') { return 'accounts'; }
+        if (prefix.indexOf('theme:') === 0) { return 'themes'; }
+        if (prefix.indexOf('plugin:') === 0) { return 'plugins'; }
+        return '';
+    }
+
+    /** Collapses the 5 internal types into the 3 groups shown in the "Status" filter. */
+    function statusGroup(type) {
+        if (type === 'conflict') { return 'conflict'; }
+        if (type === 'push' || type === 'deleted_remote') { return 'local_only'; }
+        if (type === 'pull' || type === 'deleted_local') { return 'host_only'; }
+        return '';
+    }
+
+    /**
+     * Local/Host columns. Conflict: the side with the newer mtime shows
+     * "Newer" (light blue), the older side shows "Conflict" (red).
+     * Push/pull/deleted_*: "X" on whichever side currently has the file.
+     */
+    function statusCells(row) {
+        var empty = { text: '', cls: '' };
+        var conflictCell = { text: 'Conflict', cls: 'sc-status-conflict' };
+        var newerCell = { text: 'Newer', cls: 'sc-status-newer' };
+        var olderCell = { text: 'Older', cls: 'sc-status-older' };
+        var xCell = { text: 'X', cls: 'sc-status-x' };
+
+        switch (row.type) {
+            case 'conflict':
+                if (row.newer === 'local') { return [newerCell, olderCell]; }
+                if (row.newer === 'remote') { return [olderCell, newerCell]; }
+                return [conflictCell, conflictCell];
+            case 'push':
+            case 'deleted_remote':
+                return [xCell, empty];
+            case 'pull':
+            case 'deleted_local':
+                return [empty, xCell];
+            default:
+                return [empty, empty];
+        }
+    }
+
+    function buildResolutionSelect(path, type) {
+        var select = document.createElement('select');
+        select.dataset.path = path;
+        select.className = 'sc-resolution';
+        RESOLUTION_OPTIONS.forEach(function (opt) {
+            var o = document.createElement('option');
+            o.value = opt[0];
+            o.textContent = opt[1];
+            select.appendChild(o);
+        });
+        select.value = DEFAULT_RESOLUTION[type] ?? '';
+        return select;
+    }
+
+    function renderRows(rows) {
+        lastRows = rows || {};
+        tbody.innerHTML = '';
+        var paths = Object.keys(lastRows);
+
+        if (paths.length === 0) {
+            results.style.display = 'none';
+            setStatus('No differences — local and hosting are in sync.', false);
+            return;
+        }
+
+        paths.sort();
+        paths.forEach(function (path) {
+            var type = lastRows[path].type;
+            var cells = statusCells(lastRows[path]);
+
+            var tr = document.createElement('tr');
+            tr.dataset.path = path;
+            tr.dataset.kind = kindOfPath(path);
+            tr.dataset.type = type;
+            tr.dataset.statusGroup = statusGroup(type);
+
+            var tdCheck = document.createElement('td');
+            tdCheck.className = 'sc-col-checkbox';
+            var checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'sc-row-select';
+            tdCheck.appendChild(checkbox);
+            tr.appendChild(tdCheck);
+
+            var tdPath = document.createElement('td');
+            tdPath.textContent = path;
+            tdPath.title = TYPE_LABELS[type] || type;
+            tr.appendChild(tdPath);
+
+            var tdLocal = document.createElement('td');
+            tdLocal.className = 'sc-col-status' + (cells[0].cls ? ' ' + cells[0].cls : '');
+            tdLocal.textContent = cells[0].text;
+            tr.appendChild(tdLocal);
+
+            var tdHost = document.createElement('td');
+            tdHost.className = 'sc-col-status' + (cells[1].cls ? ' ' + cells[1].cls : '');
+            tdHost.textContent = cells[1].text;
+            tr.appendChild(tdHost);
+
+            var tdAction = document.createElement('td');
+            tdAction.className = 'sc-col-action';
+            tdAction.appendChild(buildResolutionSelect(path, type));
+            tr.appendChild(tdAction);
+
+            tbody.appendChild(tr);
+        });
+
+        selectAll.checked = false;
+        applyFilters();
+        results.style.display = '';
+        setStatus(paths.length + ' file(s) differ.', false);
+    }
+
+    function applyFilters() {
+        var kind = filterKind.value;
+        var status = filterStatus.value;
+
+        tbody.querySelectorAll('tr').forEach(function (tr) {
+            var matchKind = !kind || tr.dataset.kind === kind;
+            var matchStatus = !status || tr.dataset.statusGroup === status;
+            tr.style.display = (matchKind && matchStatus) ? '' : 'none';
+        });
+    }
+
+    filterApplyBtn.addEventListener('click', applyFilters);
+
+    selectAll.addEventListener('change', function () {
+        tbody.querySelectorAll('tr').forEach(function (tr) {
+            if (tr.style.display === 'none') { return; }
+            var cb = tr.querySelector('.sc-row-select');
+            if (cb) { cb.checked = selectAll.checked; }
+        });
+    });
+
+    bulkApplyBtn.addEventListener('click', function () {
+        var value = bulkAction.value;
+        var count = 0;
+        tbody.querySelectorAll('tr').forEach(function (tr) {
+            var cb = tr.querySelector('.sc-row-select');
+            if (!cb || !cb.checked) { return; }
+            var select = tr.querySelector('select.sc-resolution');
+            if (select) {
+                select.value = value;
+                count++;
+            }
+        });
+        if (count === 0) {
+            setStatus('No rows selected to apply the bulk action to.', true);
+        } else {
+            setStatus('Applied to ' + count + ' row(s).', false);
+        }
+    });
+
+    function selectedKinds() {
+        var kinds = [];
+        kindCheckboxes.forEach(function (cb) {
+            if (cb.checked) { kinds.push(cb.value); }
+        });
+        return kinds;
+    }
+
+    checkBtn.addEventListener('click', function () {
+        var kinds = selectedKinds();
+        if (kinds.length === 0) {
+            setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) to check.', true);
+            return;
+        }
+
+        setStatus('Checking...', false);
+        syncBtn.disabled = true;
+        var fields = kinds.map(function (kind) { return ['kinds[]', kind]; });
+        post('ftpsynccheckdiff', fields).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                return;
+            }
+            renderRows(data.rows || {});
+            syncBtn.disabled = !isLocal || Object.keys(data.rows || {}).length === 0;
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+        });
+    });
+
+    syncBtn.addEventListener('click', function () {
+        if (!window.confirm('Sync now? Files about to be overwritten will be backed up automatically first.')) {
+            return;
+        }
+
+        var fields = [];
+        tbody.querySelectorAll('select.sc-resolution').forEach(function (select) {
+            if (select.value) {
+                fields.push(['resolutions[' + select.dataset.path + ']', select.value]);
+            }
+        });
+
+        setStatus('Syncing...', false);
+        syncBtn.disabled = true;
+        post('ftpsyncsyncnow', fields).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                return;
+            }
+            var msg = 'Applied ' + data.applied + ' change(s), skipped ' + data.skipped + '.';
+            if (data.backup) {
+                msg += ' Backup: ' + data.backup;
+            }
+            if (data.errors && Object.keys(data.errors).length > 0) {
+                msg += ' ' + Object.keys(data.errors).length + ' file(s) failed (see console).';
+                console.error('FTP Sync errors:', data.errors);
+            }
+            setStatus(msg, false);
+            results.style.display = 'none';
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+        }).finally(function () {
+            syncBtn.disabled = !isLocal;
+        });
+    });
+
+    var FORCE_PUSH_CONFIRM_TOKEN = 'CONFIRMED';
+    var confirmModal = document.getElementById('sc-confirm-modal');
+    var confirmYesBtn = document.getElementById('sc-confirm-yes');
+    var confirmNoBtn = document.getElementById('sc-confirm-no');
+
+    function runForcePushAll(kinds) {
+        var fields = kinds.map(function (kind) { return ['kinds[]', kind]; });
+        fields.push(['confirm', FORCE_PUSH_CONFIRM_TOKEN]);
+
+        setStatus('Deleting hosting content and re-uploading everything from local — please wait...', false);
+        forcePushBtn.disabled = true;
+        post('ftpsyncforcepushall', fields).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                return;
+            }
+            var msg = 'Deleted ' + data.deleted + ' old file(s) on Hosting and re-uploaded ' + data.uploaded + ' file(s) from Local (' + data.groups + ' categor' + (data.groups === 1 ? 'y' : 'ies') + ').';
+            if (data.backup) {
+                msg += ' Backup: ' + data.backup;
+            }
+            setStatus(msg, false);
+            results.style.display = 'none';
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+        }).finally(function () {
+            forcePushBtn.disabled = !isLocal;
+        });
+    }
+
+    forcePushBtn.addEventListener('click', function () {
+        var kinds = selectedKinds();
+        if (kinds.length === 0) {
+            setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) before uploading.', true);
+            return;
+        }
+
+        confirmModal.dataset.kinds = JSON.stringify(kinds);
+        confirmModal.style.display = '';
+    });
+
+    confirmNoBtn.addEventListener('click', function () {
+        confirmModal.style.display = 'none';
+        setStatus('Upload cancelled.', false);
+    });
+
+    confirmYesBtn.addEventListener('click', function () {
+        var kinds = JSON.parse(confirmModal.dataset.kinds || '[]');
+        confirmModal.style.display = 'none';
+        runForcePushAll(kinds);
+    });
+
+    confirmModal.addEventListener('click', function (e) {
+        if (e.target === confirmModal) {
+            confirmModal.style.display = 'none';
+            setStatus('Upload cancelled.', false);
+        }
+    });
+
+    function formatSize(bytes) {
+        if (bytes >= 1024 * 1024) { return (bytes / (1024 * 1024)).toFixed(1) + ' MB'; }
+        if (bytes >= 1024) { return (bytes / 1024).toFixed(1) + ' KB'; }
+        return bytes + ' B';
+    }
+
+    function formatDate(unixTime) {
+        var d = new Date(unixTime * 1000);
+        function pad(n) { return n < 10 ? '0' + n : '' + n; }
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+            pad(d.getHours()) + ':' + pad(d.getMinutes());
+    }
+
+    function renderBackups(backups) {
+        backupsTbody.innerHTML = '';
+        if (!backups || backups.length === 0) {
+            backupsBox.style.display = 'none';
+            setStatus('No backups yet.', false);
+            return;
+        }
+
+        backups.forEach(function (b) {
+            var tr = document.createElement('tr');
+
+            var tdName = document.createElement('td');
+            tdName.textContent = b.name;
+            tr.appendChild(tdName);
+
+            var tdSize = document.createElement('td');
+            tdSize.className = 'sc-col-backup-meta';
+            tdSize.textContent = formatSize(b.size);
+            tr.appendChild(tdSize);
+
+            var tdCreated = document.createElement('td');
+            tdCreated.className = 'sc-col-backup-meta';
+            tdCreated.textContent = formatDate(b.created);
+            tr.appendChild(tdCreated);
+
+            var tdDelete = document.createElement('td');
+            tdDelete.className = 'sc-col-backup-action';
+            var deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'button';
+            deleteBtn.innerHTML = '<i class="fa fa-trash"></i>';
+            deleteBtn.title = 'Delete this backup';
+            deleteBtn.dataset.name = b.name;
+            tdDelete.appendChild(deleteBtn);
+            tr.appendChild(tdDelete);
+
+            backupsTbody.appendChild(tr);
+        });
+
+        backupsBox.style.display = '';
+        setStatus(backups.length + ' backup(s).', false);
+    }
+
+    function loadBackups() {
+        setStatus('Loading backups...', false);
+        return post('ftpsynclistbackups').then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                return;
+            }
+            renderBackups(data.backups || []);
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+        });
+    }
+
+    showBackupsBtn.addEventListener('click', function () {
+        if (backupsBox.style.display !== 'none') {
+            backupsBox.style.display = 'none';
+            return;
+        }
+        loadBackups();
+    });
+
+    var copyBackupPathBtn = document.getElementById('sc-copy-backup-path');
+    if (copyBackupPathBtn) {
+        copyBackupPathBtn.addEventListener('click', function () {
+            var path = copyBackupPathBtn.dataset.path;
+            navigator.clipboard.writeText(path).then(function () {
+                setStatus('Path copied — paste it into File Explorer after your project folder.', false);
+            }).catch(function () {
+                setStatus('Could not copy automatically — path: ' + path, true);
+            });
+        });
+    }
+
+    backupsTbody.addEventListener('click', function (e) {
+        var btn = e.target.closest('button[data-name]');
+        if (!btn) { return; }
+
+        var name = btn.dataset.name;
+        if (!window.confirm('Delete backup "' + name + '"? This cannot be undone.')) {
+            return;
+        }
+
+        setStatus('Deleting backup...', false);
+        post('ftpsyncdeletebackup', [['name', name]]).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                return;
+            }
+            setStatus('Backup deleted.', false);
+            loadBackups();
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+        });
+    });
+})();
+</script>
+{% endif %}
+{% endblock %}

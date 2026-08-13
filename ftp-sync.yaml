@@ -1,0 +1,13 @@
+enabled: true
+force_allow_remote: false
+backup_enabled: true
+remote_base_path: '/'
+sync_plugins: ''
+ignore_patterns: '.git,cache,.ddev,node_modules,*.zip,.DS_Store,Thumbs.db,security.yaml,security-private.php,versions.yaml,ftp-sync.yaml'
+ftp:
+  host: ''
+  port: 21
+  username: ''
+  password: ''
+  ssl: false
+  passive: true
