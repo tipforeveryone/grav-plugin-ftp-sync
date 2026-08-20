@@ -13,6 +13,38 @@ namespace Grav\Plugin\FtpSync;
  */
 class SyncManager
 {
+    /** Số file xử lý mỗi batch (mỗi request AJAX) khi upload/sync — để UI vẽ progress bar theo tiến trình thật. */
+    private const BATCH_SIZE = 25;
+
+    /**
+     * "Full deploy" bỏ qua hoàn toàn checkbox/sync_plugins — tự quét TOÀN
+     * BỘ GRAV_ROOT rồi loại trừ đúng những gì không ảnh hưởng tới việc site
+     * chạy được. Danh sách này chỉ loại trừ khi tên khớp NGAY CẤP GỐC
+     * (GRAV_ROOT/<tên>), tránh lặp lại lỗi cũ (loại "cache" theo segment ở
+     * MỌI cấp từng xoá nhầm vendor/doctrine/cache/...).
+     */
+    private const FULL_DEPLOY_TOP_LEVEL_EXCLUDE = [
+        '.ddev' => true, '.dependencies' => true, '.editorconfig' => true, '.env' => true,
+        '.env.example' => true, '.git' => true, '.github' => true, '.gitignore' => true,
+        '.gitmodules' => true, '.phan' => true, '.vscode' => true, '.idea' => true,
+        'CHANGELOG.md' => true, 'CLAUDE.md' => true, 'CODE_OF_CONDUCT.md' => true, 'CONTRIBUTING.md' => true,
+        'LICENSE' => true, 'LICENSE.txt' => true, 'LICENSE.md' => true, 'README.md' => true, 'SECURITY.md' => true,
+        'codeception.yml' => true, 'composer.json' => true, 'composer.lock' => true, 'now.json' => true,
+        'backup' => true, 'cache' => true, 'logs' => true, 'tmp' => true, 'tests' => true,
+        'webserver-configs' => true, 'bin' => true, 'node_modules' => true,
+        // assets/ và images/ ở GỐC là cache pipeline CSS/JS + cache resize ảnh của Grav (auto sinh lại khi
+        // chạy) — khác với system/assets/ hay assets/ bên trong theme, những cái đó KHÔNG bị loại vì đây
+        // chỉ khớp đúng cấp gốc.
+        'assets' => true, 'images' => true,
+    ];
+
+    /**
+     * Loại trừ theo TÊN THƯ MỤC ở BẤT KỲ cấp nào (kể cả sâu trong vendor/
+     * system) — chỉ dùng cho tên rõ ràng là artefact dev (test/doc/CI),
+     * không bao giờ là tên thư mục runtime hợp lệ.
+     */
+    private const FULL_DEPLOY_SUBTREE_EXCLUDE = ['.git', '.ddev', 'node_modules', 'tests', 'test', 'docs', 'doc', 'examples', 'example', '.github', 'phpstan'];
+
     private array $config;
     private string $dataDir;
 
@@ -144,133 +176,349 @@ class SyncManager
     }
 
     /**
-     * Force-push: XOÁ TOÀN BỘ nội dung hiện có trên hosting (trong các
-     * group thuộc $kinds), backup lại trước khi xoá, rồi upload lại TOÀN
-     * BỘ file từ local lên. Không quan tâm diff/baseline cũ — coi local là
-     * nguồn chân lý tuyệt đối cho lần này. Dùng khi hosting bị lỗi/rác và
-     * muốn "làm mới" hoàn toàn từ local.
+     * Bước 1/2 của "Replace local sync to hosting": quét local + remote
+     * (trong các group thuộc $kinds, theo checkbox người dùng chọn) và xếp
+     * thành 2 hàng đợi (xoá remote cũ, upload local mới), lưu vào
+     * push-job.json. Không xoá/upload gì ở bước này — gọi stepPushJob()
+     * lặp lại nhiều lần (mỗi lần 1 batch) để UI vẽ được progress bar theo
+     * tiến trình thật thay vì 1 request treo rất lâu.
      *
      * @param string[] $kinds Rỗng = tất cả group đang cấu hình.
-     * @return array{uploaded:int, deleted:int, groups:int, backup:?string}
+     * @return array{job_id:string, total:int}
      */
-    public function forcePushAll(array $kinds = []): array
+    public function startPushJob(array $kinds = []): array
     {
         $groups = $this->resolveGroups($kinds);
         if (empty($groups)) {
             throw new \RuntimeException('No content selected to upload.');
         }
 
-        $ignorePatterns = $this->ignorePatterns();
-        $scanner = new FileScanner($ignorePatterns);
-
+        $scanner = new FileScanner($this->ignorePatterns());
         $ftp = new FtpClient();
         $this->connectFtp($ftp);
 
-        $backup = ($this->config['backup_enabled'] ?? true)
-            ? new BackupManager($this->dataDir . '/backups')
-            : null;
-
-        $baseline = $this->loadBaseline();
-        $uploaded = 0;
-        $deleted = 0;
+        $deleteOps = [];
+        $uploadOps = [];
 
         try {
             foreach ($groups as $groupKey => $group) {
-                $remoteBase = rtrim($group['remote'], '/');
-                $localBase = rtrim($group['local'], '/');
-
-                // 1) Backup toàn bộ remote hiện có trước khi xoá.
-                $remoteFiles = $ftp->scan($remoteBase, [$scanner, 'isIgnored']);
-                foreach ($remoteFiles as $relPath => $stat) {
-                    if ($backup) {
-                        $this->backupRemote($backup, $ftp, $relPath, $remoteBase . '/' . $relPath);
-                    }
-                    $deleted++;
+                foreach (array_keys($ftp->scan($group['remote'], [$scanner, 'isIgnored'])) as $relPath) {
+                    $deleteOps[] = [$groupKey, $relPath];
                 }
-
-                // 2) Xoá toàn bộ remote (sau khi đã backup xong).
-                $ftp->deleteTree($remoteBase);
-
-                // 3) Upload lại toàn bộ local.
-                $localFiles = $scanner->scan($localBase);
-                foreach ($localFiles as $relPath => $stat) {
-                    $path = $groupKey . '/' . $relPath;
-                    $ftp->upload($localBase . '/' . $relPath, $remoteBase . '/' . $relPath);
-                    $baseline[$path] = [
-                        'local' => $stat,
-                        'remote' => $this->statRemote($ftp, $remoteBase . '/' . $relPath),
-                    ];
-                    $uploaded++;
-                }
-
-                // Baseline cũ của path không còn ở local (đã bị xoá khỏi remote, không upload lại) -> bỏ.
-                $prefix = $groupKey . '/';
-                foreach (array_keys($baseline) as $path) {
-                    if (str_starts_with($path, $prefix) && !isset($localFiles[substr($path, strlen($prefix))])) {
-                        unset($baseline[$path]);
-                    }
+                foreach (array_keys($scanner->scan($group['local'])) as $relPath) {
+                    $uploadOps[] = [$groupKey, $relPath];
                 }
             }
         } finally {
             $ftp->close();
         }
 
-        $this->saveJson($this->dataDir . '/baseline.json', $baseline);
+        $jobId = bin2hex(random_bytes(8));
+        $job = [
+            'id' => $jobId,
+            'groups' => $groups,
+            'delete_ops' => $deleteOps,
+            'upload_ops' => $uploadOps,
+            'total' => count($deleteOps) + count($uploadOps),
+            'done' => 0,
+            'uploaded' => 0,
+            'deleted' => 0,
+            'baseline' => $this->loadBaseline(),
+            'backup_zip' => null,
+            'backup_has_entries' => false,
+        ];
+        $this->saveJson($this->dataDir . '/push-job.json', $job);
+
+        return ['job_id' => $jobId, 'total' => $job['total']];
+    }
+
+    /**
+     * Bước 2/2: xử lý 1 batch (tối đa BATCH_SIZE thao tác) của job đã tạo
+     * bởi startPushJob() — trước hết rút cạn hàng đợi xoá (backup rồi xoá
+     * từng file remote), sau đó tới hàng đợi upload. Gọi lặp lại tới khi
+     * finished=true.
+     *
+     * @return array{done:int,total:int,uploaded:int,deleted:int,finished:bool,backup:?string,groups:int}
+     */
+    public function stepPushJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
+    {
+        $job = $this->loadJson($this->dataDir . '/push-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such upload job (it may have finished, been cancelled, or expired).');
+        }
+
+        $groups = $job['groups'];
+        $baseline = $job['baseline'];
+
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+
+        $backup = $this->openBackupForJob($job);
+
+        $processed = 0;
+
+        try {
+            while ($processed < $batchSize && !empty($job['delete_ops'])) {
+                [$groupKey, $relPath] = array_shift($job['delete_ops']);
+                $group = $groups[$groupKey];
+                $remoteFile = rtrim($group['remote'], '/') . '/' . $relPath;
+
+                $this->backupRemote($backup, $ftp, $groupKey . '/' . $relPath, $remoteFile);
+                $ftp->delete($remoteFile);
+
+                $job['deleted']++;
+                $job['done']++;
+                $processed++;
+            }
+
+            while ($processed < $batchSize && !empty($job['upload_ops'])) {
+                [$groupKey, $relPath] = array_shift($job['upload_ops']);
+                $group = $groups[$groupKey];
+                $localFile = rtrim($group['local'], '/') . '/' . $relPath;
+                $remoteFile = rtrim($group['remote'], '/') . '/' . $relPath;
+
+                $ftp->upload($localFile, $remoteFile);
+                $baseline[$groupKey . '/' . $relPath] = [
+                    'local' => $this->statLocal($localFile),
+                    'remote' => $this->statRemote($ftp, $remoteFile),
+                ];
+
+                $job['uploaded']++;
+                $job['done']++;
+                $processed++;
+            }
+        } finally {
+            $ftp->close();
+        }
+
+        $finished = empty($job['delete_ops']) && empty($job['upload_ops']);
+        $backupResult = $this->closeBackupForJob($backup, $job, $finished);
+
+        $job['baseline'] = $baseline;
+
+        if ($finished) {
+            $this->saveJson($this->dataDir . '/baseline.json', $baseline);
+            @unlink($this->dataDir . '/push-job.json');
+        } else {
+            $this->saveJson($this->dataDir . '/push-job.json', $job);
+        }
 
         return [
-            'uploaded' => $uploaded,
-            'deleted' => $deleted,
+            'done' => $job['done'],
+            'total' => $job['total'],
+            'uploaded' => $job['uploaded'],
+            'deleted' => $job['deleted'],
+            'finished' => $finished,
+            'backup' => $backupResult ? basename($backupResult) : null,
             'groups' => count($groups),
-            'backup' => $backup ? basename((string) $backup->close()) : null,
         ];
     }
 
     /**
-     * Áp dụng kết quả diff đã lưu ở checkDiff(). $resolutions: relPath (đã
-     * có tiền tố group) => 'local'|'remote'|'delete_local'|'delete_remote'
-     * (rỗng/thiếu = bỏ qua). Vocabulary này áp dụng đồng nhất cho MỌI loại
-     * row (push/pull/conflict/deleted_*) — 'local' luôn nghĩa là "đẩy bản
-     * local lên hosting", 'remote' luôn là "kéo bản hosting về local",
-     * không phụ thuộc row đang ở type gì.
+     * Bước 1/2 của "Full deploy to hosting": BỎ QUA hoàn toàn checkbox và
+     * sync_plugins — tự quét TOÀN BỘ GRAV_ROOT, loại trừ đúng những gì
+     * không ảnh hưởng tới việc site chạy được (xem FULL_DEPLOY_*_EXCLUDE).
+     * Xoá sạch nội dung tương ứng hiện có trên hosting, rồi nén phần còn
+     * lại thành 1 file .zip DUY NHẤT và upload lên gốc remote_base_path —
+     * KHÔNG tự giải nén, người dùng tự giải nén thủ công trên hosting.
      *
-     * @return array{applied:int, skipped:int, backup:?string, errors:array<string,string>}
+     * @return array{job_id:string, total:int}
      */
-    public function syncNow(array $resolutions): array
+    public function startFullDeployJob(): array
+    {
+        $remoteBase = rtrim($this->config['remote_base_path'] ?? '/', '/');
+        $localFiles = $this->scanFullDeployLocal();
+        if (empty($localFiles)) {
+            throw new \RuntimeException('Nothing found to deploy.');
+        }
+
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+
+        $deleteOps = [];
+        try {
+            foreach (array_keys($this->scanFullDeployRemote($ftp, $remoteBase)) as $relPath) {
+                $deleteOps[] = $relPath;
+            }
+        } finally {
+            $ftp->close();
+        }
+
+        $jobId = bin2hex(random_bytes(8));
+        $job = [
+            'id' => $jobId,
+            'remote_base' => $remoteBase,
+            'delete_ops' => $deleteOps,
+            'zip_ops' => array_keys($localFiles),
+            'zip_done' => false,
+            'zip_remote_name' => null,
+            'total' => count($deleteOps) + count($localFiles),
+            'done' => 0,
+            'uploaded' => 0,
+            'deleted' => 0,
+            'backup_zip' => null,
+            'backup_has_entries' => false,
+        ];
+        $this->saveJson($this->dataDir . '/full-deploy-job.json', $job);
+
+        return ['job_id' => $jobId, 'total' => $job['total']];
+    }
+
+    /**
+     * Bước 2/2: xử lý 1 batch của job full-deploy — rút cạn hàng đợi xoá
+     * (backup rồi xoá từng file remote, theo batch như bình thường), rồi
+     * tới lượt "phase zip" (nén local + 1 FTP upload DUY NHẤT, không giới
+     * hạn theo $batchSize vì bản thân nó đã là 1 thao tác gộp). Gọi lặp
+     * lại tới khi finished=true.
+     *
+     * @return array{done:int,total:int,uploaded:int,deleted:int,finished:bool,backup:?string,zip_file:?string}
+     */
+    public function stepFullDeployJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
+    {
+        $job = $this->loadJson($this->dataDir . '/full-deploy-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such deploy job (it may have finished, been cancelled, or expired).');
+        }
+
+        $remoteBase = $job['remote_base'];
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+
+        $backup = $this->openBackupForJob($job);
+
+        $processed = 0;
+
+        try {
+            while ($processed < $batchSize && !empty($job['delete_ops'])) {
+                $relPath = array_shift($job['delete_ops']);
+                $remoteFile = $remoteBase . '/' . $relPath;
+
+                $this->backupRemote($backup, $ftp, $relPath, $remoteFile);
+                $ftp->delete($remoteFile);
+
+                $job['deleted']++;
+                $job['done']++;
+                $processed++;
+            }
+
+            // Phase zip: chỉ chạy sau khi hàng đợi xoá đã rút cạn — 1 lượt
+            // duy nhất (nén local + 1 FTP upload), không bị giới hạn bởi
+            // $batchSize. Zip đặt ở gốc remote_base_path, KHÔNG tự giải nén
+            // — người dùng tự giải nén thủ công trên hosting.
+            if (empty($job['delete_ops']) && !empty($job['zip_ops']) && !$job['zip_done']) {
+                $job['zip_remote_name'] = $this->buildAndUploadFullDeployZip($job, $ftp, $remoteBase);
+                $job['uploaded'] += count($job['zip_ops']);
+                $job['done'] += count($job['zip_ops']);
+                $job['zip_ops'] = [];
+                $job['zip_done'] = true;
+            }
+        } finally {
+            $ftp->close();
+        }
+
+        $finished = empty($job['delete_ops']) && empty($job['zip_ops']);
+        $backupResult = $this->closeBackupForJob($backup, $job, $finished);
+
+        if ($finished) {
+            @unlink($this->dataDir . '/full-deploy-job.json');
+        } else {
+            $this->saveJson($this->dataDir . '/full-deploy-job.json', $job);
+        }
+
+        return [
+            'done' => $job['done'],
+            'total' => $job['total'],
+            'uploaded' => $job['uploaded'],
+            'deleted' => $job['deleted'],
+            'finished' => $finished,
+            'backup' => $backupResult ? basename($backupResult) : null,
+            'zip_file' => $job['zip_remote_name'],
+        ];
+    }
+
+    /**
+     * Bước 1/2: xây hàng đợi thao tác từ kết quả diff đã lưu ở checkDiff()
+     * + lựa chọn resolution của người dùng, lưu vào sync-job.json.
+     * $resolutions: relPath (đã có tiền tố group) =>
+     * 'local'|'remote'|'delete_local'|'delete_remote' (rỗng/thiếu = bỏ
+     * qua). Vocabulary áp dụng đồng nhất cho MỌI loại row (push/pull/
+     * conflict/deleted_*) — 'local' luôn nghĩa là "đẩy bản local lên
+     * hosting", 'remote' luôn là "kéo bản hosting về local".
+     *
+     * @return array{job_id:string, total:int}
+     */
+    public function startSyncJob(array $resolutions): array
     {
         $state = $this->loadJson($this->dataDir . '/last-diff.json');
         if ($state === null) {
             throw new \RuntimeException('No diff data yet — click "Check differences" first.');
         }
 
-        /** @var array<string,array{local:string,remote:string,label:string}> $groups */
-        $groups = $state['groups'];
-        $local = $state['local'];
-        $remote = $state['remote'];
-        $baseline = $state['baseline'];
         $rows = $state['rows'];
+        $ops = [];
+        $skipped = 0;
+        foreach ($rows as $path => $row) {
+            $action = $this->resolveAction($resolutions[$path] ?? null);
+            if ($action === null) {
+                $skipped++;
+                continue;
+            }
+            $ops[] = [$path, $action];
+        }
+
+        $jobId = bin2hex(random_bytes(8));
+        $job = [
+            'id' => $jobId,
+            'groups' => $state['groups'],
+            'local' => $state['local'],
+            'remote' => $state['remote'],
+            'ops' => $ops,
+            'total' => count($ops),
+            'skipped' => $skipped,
+            'applied' => 0,
+            'errors' => [],
+            'baseline' => $state['baseline'],
+            'backup_zip' => null,
+            'backup_has_entries' => false,
+        ];
+        $this->saveJson($this->dataDir . '/sync-job.json', $job);
+
+        return ['job_id' => $jobId, 'total' => $job['total']];
+    }
+
+    /**
+     * Bước 2/2: xử lý 1 batch (tối đa BATCH_SIZE thao tác) của job đã tạo
+     * bởi startSyncJob(). Gọi lặp lại tới khi finished=true.
+     *
+     * @return array{done:int,total:int,applied:int,skipped:int,errors:array<string,string>,finished:bool,backup:?string}
+     */
+    public function stepSyncJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
+    {
+        $job = $this->loadJson($this->dataDir . '/sync-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such sync job (it may have finished, been cancelled, or expired).');
+        }
+
+        $groups = $job['groups'];
+        $local = $job['local'];
+        $remote = $job['remote'];
+        $baseline = $job['baseline'];
 
         $ftp = new FtpClient();
         $this->connectFtp($ftp);
 
-        $backup = ($this->config['backup_enabled'] ?? true)
-            ? new BackupManager($this->dataDir . '/backups')
-            : null;
+        $backup = $this->openBackupForJob($job);
 
-        $applied = 0;
-        $skipped = 0;
-        $errors = [];
+        $processed = 0;
 
         try {
-            foreach ($rows as $path => $row) {
-                $action = $this->resolveAction($resolutions[$path] ?? null);
-                if ($action === null) {
-                    $skipped++;
-                    continue;
-                }
+            while ($processed < $batchSize && !empty($job['ops'])) {
+                [$path, $action] = array_shift($job['ops']);
+                $processed++;
 
                 [$groupKey, $relPath] = $this->splitGroupPath($path, $groups);
                 if ($groupKey === null) {
-                    $skipped++;
+                    $job['skipped']++;
                     continue;
                 }
                 $group = $groups[$groupKey];
@@ -302,24 +550,197 @@ class SyncManager
                         unset($baseline[$path]);
                     }
 
-                    $applied++;
+                    $job['applied']++;
                 } catch (\Throwable $e) {
-                    $skipped++;
-                    $errors[$path] = $e->getMessage();
+                    $job['skipped']++;
+                    $job['errors'][$path] = $e->getMessage();
                 }
             }
         } finally {
             $ftp->close();
         }
 
-        $this->saveJson($this->dataDir . '/baseline.json', $baseline);
+        $finished = empty($job['ops']);
+        $backupResult = $this->closeBackupForJob($backup, $job, $finished);
+
+        $job['baseline'] = $baseline;
+
+        if ($finished) {
+            $this->saveJson($this->dataDir . '/baseline.json', $baseline);
+            @unlink($this->dataDir . '/sync-job.json');
+        } else {
+            $this->saveJson($this->dataDir . '/sync-job.json', $job);
+        }
 
         return [
-            'applied' => $applied,
-            'skipped' => $skipped,
-            'errors' => $errors,
-            'backup' => $backup ? basename((string) $backup->close()) : null,
+            'done' => $job['total'] - count($job['ops']),
+            'total' => $job['total'],
+            'applied' => $job['applied'],
+            'skipped' => $job['skipped'],
+            'errors' => $finished ? $job['errors'] : [],
+            'finished' => $finished,
+            'backup' => $backupResult ? basename($backupResult) : null,
         ];
+    }
+
+    /**
+     * Mở BackupManager cho 1 batch của job: nếu job đã có backup_zip từ
+     * batch trước (nghĩa là đã thực sự có entry, file zip chắc chắn tồn
+     * tại) thì mở lại để nối thêm; nếu chưa, tạo mới. KHÔNG được lưu
+     * backup_zip vào job khi zip đang rỗng — ZipArchive::close() không ghi
+     * file vật lý nào cả khi không có entry, nên mở lại 1 zip "rỗng" như
+     * vậy sẽ ném lỗi "Invalid or uninitialized Zip object".
+     */
+    private function openBackupForJob(array $job): ?BackupManager
+    {
+        if (!($this->config['backup_enabled'] ?? true)) {
+            return null;
+        }
+
+        return $job['backup_zip']
+            ? new BackupManager($this->dataDir . '/backups', $job['backup_zip'], $job['backup_has_entries'])
+            : new BackupManager($this->dataDir . '/backups');
+    }
+
+    /**
+     * Đóng BackupManager sau 1 batch. Chỉ ghi backup_zip vào $job (để batch
+     * sau mở lại) một khi zip đã thực sự có entry — xem giải thích ở
+     * openBackupForJob(). Trả về đường dẫn zip cuối cùng khi $finished (đã
+     * xử lý xong toàn bộ job), null nếu chưa xong hoặc không có gì backup.
+     */
+    private function closeBackupForJob(?BackupManager $backup, array &$job, bool $finished): ?string
+    {
+        if (!$backup) {
+            return null;
+        }
+
+        if ($finished) {
+            return $backup->finish();
+        }
+
+        $backup->flush();
+        if ($backup->hasEntries()) {
+            $job['backup_zip'] = $backup->zipPath();
+            $job['backup_has_entries'] = true;
+        }
+        return null;
+    }
+
+    /**
+     * Grav tự kiểm tra các thư mục này PHẢI TỒN TẠI (rỗng cũng được, miễn
+     * ghi được) mới chạy — xem EssentialFolders::process() của plugin
+     * "problems". Nội dung bên trong bị loại khỏi deploy (chỉ là cache
+     * runtime), nhưng bản thân THƯ MỤC vẫn phải có mặt trong zip, nếu
+     * không zip sẽ không tạo ra thư mục nào cả khi giải nén.
+     */
+    private const FULL_DEPLOY_REQUIRED_EMPTY_DIRS = ['cache', 'logs', 'tmp', 'backup', 'images', 'assets'];
+
+    /**
+     * Nén toàn bộ $job['zip_ops'] (relPath tương đối GRAV_ROOT, VD
+     * "system/src/.../Client.php", "user/pages/...", "index.php") thành 1
+     * file .zip local, rồi upload đúng 1 lần qua FTP lên gốc $remoteBase.
+     * KHÔNG tự giải nén — người dùng tự giải nén thủ công trên hosting.
+     * Trả về tên file zip đã upload (để báo người dùng biết cần giải nén
+     * file nào).
+     */
+    private function buildAndUploadFullDeployZip(array $job, FtpClient $ftp, string $remoteBase): string
+    {
+        $zipPath = $this->dataDir . '/deploy-' . $job['id'] . '.zip';
+
+        $zip = new \ZipArchive();
+        $zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
+        foreach ($job['zip_ops'] as $relPath) {
+            $zip->addFile(GRAV_ROOT . '/' . $relPath, $relPath);
+        }
+        foreach (self::FULL_DEPLOY_REQUIRED_EMPTY_DIRS as $dir) {
+            $zip->addEmptyDir($dir);
+        }
+        $zip->close();
+
+        try {
+            $remoteZipName = 'deploy-' . date('Y-m-d_His') . '.zip';
+            $ftp->upload($zipPath, $remoteBase . '/' . $remoteZipName);
+            return $remoteZipName;
+        } finally {
+            @unlink($zipPath);
+        }
+    }
+
+    /**
+     * Quét TOÀN BỘ GRAV_ROOT ở local cho "Full deploy", áp dụng
+     * FULL_DEPLOY_TOP_LEVEL_EXCLUDE + FULL_DEPLOY_SUBTREE_EXCLUDE +
+     * ignore_patterns của người dùng. Trả về relPath (tương đối GRAV_ROOT,
+     * dùng '/') => stat — relPath này CHÍNH LÀ đường dẫn thật trên webroot.
+     *
+     * @return array<string, array{mtime:int,size:int}>
+     */
+    private function scanFullDeployLocal(): array
+    {
+        $result = [];
+        $this->walkFullDeployLocal(GRAV_ROOT, '', $result);
+        return $result;
+    }
+
+    private function walkFullDeployLocal(string $baseDir, string $relDir, array &$result): void
+    {
+        $fullDir = $relDir !== '' ? $baseDir . '/' . $relDir : $baseDir;
+        $items = @scandir($fullDir) ?: [];
+
+        foreach ($items as $name) {
+            if ($name === '.' || $name === '..') {
+                continue;
+            }
+
+            $relPath = $relDir !== '' ? $relDir . '/' . $name : $name;
+            if ($this->isFullDeployIgnored($relPath)) {
+                continue;
+            }
+
+            $fullPath = $fullDir . '/' . $name;
+            if (is_dir($fullPath)) {
+                $this->walkFullDeployLocal($baseDir, $relPath, $result);
+            } else {
+                $result[$relPath] = ['mtime' => filemtime($fullPath) ?: 0, 'size' => filesize($fullPath) ?: 0];
+            }
+        }
+    }
+
+    /** Quét remote tương ứng, dùng chung logic loại trừ với scanFullDeployLocal(). */
+    private function scanFullDeployRemote(FtpClient $ftp, string $remoteBase): array
+    {
+        return $ftp->scan($remoteBase, [$this, 'isFullDeployIgnored']);
+    }
+
+    /**
+     * Logic loại trừ dùng chung cho cả quét local lẫn remote của Full
+     * Deploy: khớp TOP_LEVEL_EXCLUDE chỉ ở segment đầu tiên (đúng cấp gốc),
+     * loại riêng user/data/ftp-sync (dữ liệu runtime của chính plugin này),
+     * rồi khớp SUBTREE_EXCLUDE + ignore_patterns người dùng ở BẤT KỲ
+     * segment nào.
+     */
+    public function isFullDeployIgnored(string $relPath): bool
+    {
+        $segments = explode('/', $relPath);
+
+        if (isset(self::FULL_DEPLOY_TOP_LEVEL_EXCLUDE[$segments[0]])) {
+            return true;
+        }
+
+        if ($relPath === 'user/data/ftp-sync' || str_starts_with($relPath, 'user/data/ftp-sync/')) {
+            return true;
+        }
+
+        $subtreeExclude = array_merge(self::FULL_DEPLOY_SUBTREE_EXCLUDE, $this->ignorePatterns());
+        foreach ($segments as $segment) {
+            foreach ($subtreeExclude as $pattern) {
+                $pattern = trim($pattern);
+                if ($pattern !== '' && fnmatch($pattern, $segment)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /** Map resolution người dùng chọn ('local'|'remote'|'delete_local'|'delete_remote') -> hành động. */

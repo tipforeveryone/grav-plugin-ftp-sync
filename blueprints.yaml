@@ -66,7 +66,7 @@ form:
     ignore_patterns:
       type: text
       label: File/folder patterns to skip when syncing
-      help: 'Comma-separated, supports the * wildcard (e.g. .git,cache,.ddev,node_modules,*.zip). Sensitive files under user/config (security.yaml, security-private.php, versions.yaml) and this plugin''s own config file (ftp-sync.yaml) are blocked by default to avoid leaking/overwriting the FTP password.'
+      help: 'Comma-separated, supports the * wildcard (e.g. .git,.ddev,node_modules,*.zip). Matched against EVERY path segment, at any depth — avoid generic words like "cache" here, many composer packages under vendor/ legitimately have a folder named exactly that (vendor/doctrine/cache, vendor/psr/cache, ...) and it would silently exclude them from Full deploy, breaking the site. Sensitive files under user/config (security.yaml, security-private.php, versions.yaml) and this plugin''s own config file (ftp-sync.yaml) are blocked by default to avoid leaking/overwriting the FTP password.'
       default: '.git,cache,.ddev,node_modules,*.zip,.DS_Store,Thumbs.db,security.yaml,security-private.php,versions.yaml,ftp-sync.yaml'
       validate:
         type: commalist

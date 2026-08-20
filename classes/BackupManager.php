@@ -11,16 +11,31 @@ class BackupManager
 {
     private \ZipArchive $zip;
     private string $zipPath;
-    private bool $hasEntries = false;
+    private bool $hasEntries;
 
-    public function __construct(string $backupDir)
+    /**
+     * $existingZipPath/$hasEntries cho phép "mở lại" 1 zip đã tạo ở batch
+     * trước (dùng cho sync/upload theo tiến trình nhiều request — mỗi
+     * request phải flush() zip xuống đĩa rồi request sau mở lại đúng file
+     * đó để nối thêm entry, vì ZipArchive không sống được qua nhiều request).
+     */
+    public function __construct(string $backupDir, ?string $existingZipPath = null, bool $hasEntries = false)
     {
+        $this->zip = new \ZipArchive();
+
+        if ($existingZipPath !== null) {
+            $this->zipPath = $existingZipPath;
+            $this->hasEntries = $hasEntries;
+            $this->zip->open($this->zipPath);
+            return;
+        }
+
         if (!is_dir($backupDir)) {
             mkdir($backupDir, 0755, true);
         }
 
         $this->zipPath = rtrim($backupDir, '/') . '/' . date('Y-m-d_His') . '.zip';
-        $this->zip = new \ZipArchive();
+        $this->hasEntries = false;
         $this->zip->open($this->zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
     }
 
@@ -38,8 +53,24 @@ class BackupManager
         $this->hasEntries = true;
     }
 
-    /** Đóng zip; xoá file zip rỗng nếu cuối cùng không backup gì cả. */
-    public function close(): ?string
+    public function zipPath(): string
+    {
+        return $this->zipPath;
+    }
+
+    public function hasEntries(): bool
+    {
+        return $this->hasEntries;
+    }
+
+    /** Flush entries xuống đĩa mà KHÔNG quyết định giữ/xoá file — dùng giữa các batch. */
+    public function flush(): void
+    {
+        $this->zip->close();
+    }
+
+    /** Đóng hẳn ở batch cuối; xoá file zip rỗng nếu từ đầu tới cuối không backup gì cả. */
+    public function finish(): ?string
     {
         $this->zip->close();
 

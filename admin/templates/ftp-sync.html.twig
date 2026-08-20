@@ -11,7 +11,29 @@
 <div id="ftp-sync-app" data-ajax-url="{{ current_url }}.json" data-nonce="{{ admin.getNonce() }}" data-is-local="{{ ftp_sync_is_local() ? '1' : '0' }}">
 
     <style>
-        #ftp-sync-app { overflow: hidden; padding-bottom: 3rem; }
+        #ftp-sync-app { overflow: hidden; padding: 0 2rem 3rem; }
+
+        #ftp-sync-app .sc-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 2rem;
+            margin-bottom: 1.5rem;
+        }
+        #ftp-sync-app .sc-top-left {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        #ftp-sync-app .sc-top-right {
+            flex: 0 0 16rem;
+        }
+        #ftp-sync-app .sc-top-left .notices { margin: 0; }
+
+        @media (max-width: 48rem) {
+            #ftp-sync-app .sc-top { flex-direction: column; }
+            #ftp-sync-app .sc-top-right { flex-basis: auto; width: 100%; }
+            #ftp-sync-app .sc-toolbar { flex-direction: row; flex-wrap: wrap; }
+            #ftp-sync-app .sc-toolbar .button { width: auto; }
+        }
 
         #ftp-sync-app .sc-kinds {
             display: flex;
@@ -47,19 +69,46 @@
 
         #ftp-sync-app .sc-toolbar {
             display: flex;
-            justify-content: center;
-            gap: 0.75rem;
-            margin: 0 0 1.5rem;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0.6rem;
+        }
+        #ftp-sync-app .sc-toolbar .button {
+            width: 100%;
+            text-align: center;
         }
 
         #ftp-sync-app #sc-status:not(:empty) { margin-bottom: 1rem; }
 
-        #ftp-sync-app #sc-force-push-all {
+        #ftp-sync-app #sc-replace-sync,
+        #ftp-sync-app #sc-full-deploy {
             background: #c9544a;
             color: #fff;
             border-color: #a83a32;
         }
-        #ftp-sync-app #sc-force-push-all:hover { background: #a83a32; }
+        #ftp-sync-app #sc-replace-sync:hover,
+        #ftp-sync-app #sc-full-deploy:hover { background: #a83a32; }
+
+        #ftp-sync-app #sc-progress { margin: 0 0 1rem; }
+        #ftp-sync-app .sc-progress-track {
+            width: 100%;
+            height: 0.9rem;
+            background: #e6e6e6;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        #ftp-sync-app .sc-progress-fill {
+            height: 100%;
+            width: 0%;
+            background: #2c5;
+            transition: width 0.2s ease;
+        }
+        #ftp-sync-app .sc-progress-label {
+            margin-top: 0.35rem;
+            font-size: 0.85rem;
+            color: #555;
+            text-align: center;
+        }
 
         #ftp-sync-app .sc-modal-overlay {
             position: fixed;
@@ -247,54 +296,69 @@
     </style>
 
     {% if ftp_sync_is_enabled() %}
-    <div class="notices">
-        <p>Diff is based on <b>mtime + size</b> over FTP (no hashing). On the first run (no baseline yet),
-        every file that differs between local &amp; hosting shows up as <b>"Conflict"</b> so you can resolve it
-        manually once; from then on the plugin infers the sync direction automatically. Before overwriting or
-        deleting any file, the previous version is automatically zipped into <code>user/data/ftp-sync/backups/</code>.</p>
+    <div class="sc-top">
+        <div class="sc-top-left">
+            <div class="notices">
+                <p>Diff is based on <b>mtime + size</b> over FTP (no hashing). On the first run (no baseline yet),
+                every file that differs between local &amp; hosting shows up as <b>"Conflict"</b> so you can resolve it
+                manually once; from then on the plugin infers the sync direction automatically. Before overwriting or
+                deleting any file, the previous version is automatically zipped into <code>user/data/ftp-sync/backups/</code>.</p>
 
-        <div class="sc-kinds">
-            <div class="sc-kinds-title">Sync</div>
-            <label class="sc-kind-row">
-                <input type="checkbox" class="sc-kind" value="pages" checked>
-                <span class="sc-kind-name">Pages</span>
-                <span class="sc-kind-desc">user/pages (all page content)</span>
-            </label>
-            <label class="sc-kind-row">
-                <input type="checkbox" class="sc-kind" value="themes" checked>
-                <span class="sc-kind-name">Themes</span>
-                <span class="sc-kind-desc">The site's active theme (auto-detected, not configured manually)</span>
-            </label>
-            <label class="sc-kind-row">
-                <input type="checkbox" class="sc-kind" value="plugins" checked>
-                <span class="sc-kind-name">Plugins</span>
-                <span class="sc-kind-desc">Plugins listed in the config, or every plugin under user/plugins/ if that list is left empty</span>
-            </label>
-            <label class="sc-kind-row">
-                <input type="checkbox" class="sc-kind" value="config" checked>
-                <span class="sc-kind-name">Config</span>
-                <span class="sc-kind-desc">user/config (excluding sensitive files such as the FTP password)</span>
-            </label>
-            <label class="sc-kind-row">
-                <input type="checkbox" class="sc-kind" value="accounts" checked>
-                <span class="sc-kind-name">Accounts</span>
-                <span class="sc-kind-desc">user/accounts (Admin login accounts)</span>
-            </label>
+                <div class="sc-kinds">
+                    <div class="sc-kinds-title">Sync</div>
+                    <label class="sc-kind-row">
+                        <input type="checkbox" class="sc-kind" value="pages" checked>
+                        <span class="sc-kind-name">Pages</span>
+                        <span class="sc-kind-desc">user/pages (all page content)</span>
+                    </label>
+                    <label class="sc-kind-row">
+                        <input type="checkbox" class="sc-kind" value="themes" checked>
+                        <span class="sc-kind-name">Themes</span>
+                        <span class="sc-kind-desc">The site's active theme (auto-detected, not configured manually)</span>
+                    </label>
+                    <label class="sc-kind-row">
+                        <input type="checkbox" class="sc-kind" value="plugins" checked>
+                        <span class="sc-kind-name">Plugins</span>
+                        <span class="sc-kind-desc">Plugins listed in the config, or every plugin under user/plugins/ if that list is left empty</span>
+                    </label>
+                    <label class="sc-kind-row">
+                        <input type="checkbox" class="sc-kind" value="config" checked>
+                        <span class="sc-kind-name">Config</span>
+                        <span class="sc-kind-desc">user/config (excluding sensitive files such as the FTP password)</span>
+                    </label>
+                    <label class="sc-kind-row">
+                        <input type="checkbox" class="sc-kind" value="accounts" checked>
+                        <span class="sc-kind-name">Accounts</span>
+                        <span class="sc-kind-desc">user/accounts (Admin login accounts)</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <div class="sc-top-right">
+            <div class="sc-toolbar">
+                <button type="button" class="button" id="sc-check-diff"><i class="fa fa-refresh"></i> Check differences</button>
+                <button type="button" class="button primary" id="sc-sync-now" disabled>
+                    <i class="fa fa-cloud-upload"></i> Sync now
+                </button>
+                <button type="button" class="button" id="sc-replace-sync"
+                        title="Delete all files currently on Hosting (within the checked categories above), then upload everything from Local.">
+                    <i class="fa fa-warning"></i> Replace local sync to hosting
+                </button>
+                <button type="button" class="button" id="sc-full-deploy"
+                        title="Ignores the categories above — bundles the ENTIRE site (minus dev-only files) into one .zip, deletes matching files on hosting, uploads the zip. You extract it yourself on hosting.">
+                    <i class="fa fa-rocket"></i> Full deploy to hosting
+                </button>
+                <button type="button" class="button" id="sc-show-backups">
+                    <i class="fa fa-archive"></i> Show backups
+                </button>
+            </div>
         </div>
     </div>
 
-    <div class="sc-toolbar">
-        <button type="button" class="button" id="sc-check-diff"><i class="fa fa-refresh"></i> Check differences</button>
-        <button type="button" class="button primary" id="sc-sync-now" disabled>
-            <i class="fa fa-cloud-upload"></i> Sync now
-        </button>
-        <button type="button" class="button" id="sc-force-push-all"
-                title="Delete all files currently on Hosting (within the checked categories above), then upload everything from Local.">
-            <i class="fa fa-warning"></i> Upload all Local to Hosting
-        </button>
-        <button type="button" class="button" id="sc-show-backups">
-            <i class="fa fa-archive"></i> Show backups
-        </button>
+    <div id="sc-progress" style="display:none">
+        <div class="sc-progress-track"><div class="sc-progress-fill"></div></div>
+        <div class="sc-progress-label"></div>
     </div>
 
     <div id="sc-backups" style="display:none">
@@ -318,7 +382,7 @@
     </div>
 
     <div id="sc-local-warning" class="notices error" style="display:none">
-        This does not look like a local environment (no .ddev/ folder found) — "Sync now" / "Upload all" are locked.
+        This does not look like a local environment (no .ddev/ folder found) — "Sync now" / "Replace local sync" / "Full deploy" are locked.
         Enable <code>force_allow_remote</code> in the plugin config if you really want to skip this check.
     </div>
 
@@ -326,12 +390,8 @@
 
     <div id="sc-confirm-modal" class="sc-modal-overlay" style="display:none">
         <div class="sc-modal-box">
-            <div class="sc-modal-title"><i class="fa fa-exclamation-triangle"></i> Confirm: upload all Local to Hosting</div>
-            <p class="sc-modal-desc">
-                This will <b>DELETE ALL</b> files currently on Hosting (within the categories you have checked: Pages/Themes/Plugins/Config/Accounts),
-                then upload everything from Local to replace them. Anything that only exists on Hosting (and not on Local) will be lost —
-                the system will back up the Hosting copy before deleting, but you should still make sure Local is the correct version.
-            </p>
+            <div class="sc-modal-title"><i class="fa fa-exclamation-triangle"></i> <span id="sc-confirm-title">Confirm upload</span></div>
+            <p class="sc-modal-desc" id="sc-confirm-desc"></p>
             <p class="sc-modal-question">Are you sure you want to continue?</p>
             <div class="sc-modal-actions">
                 <button type="button" class="button" id="sc-confirm-yes">Yes, upload</button>
@@ -415,7 +475,8 @@
 
     var checkBtn = document.getElementById('sc-check-diff');
     var syncBtn = document.getElementById('sc-sync-now');
-    var forcePushBtn = document.getElementById('sc-force-push-all');
+    var replaceBtn = document.getElementById('sc-replace-sync');
+    var fullDeployBtn = document.getElementById('sc-full-deploy');
     var statusEl = document.getElementById('sc-status');
     var results = document.getElementById('sc-results');
     var table = document.getElementById('sc-diff-table');
@@ -431,10 +492,26 @@
     var showBackupsBtn = document.getElementById('sc-show-backups');
     var backupsBox = document.getElementById('sc-backups');
     var backupsTbody = document.querySelector('#sc-backups-table tbody');
+    var progressBox = document.getElementById('sc-progress');
+    var progressFill = progressBox.querySelector('.sc-progress-fill');
+    var progressLabel = progressBox.querySelector('.sc-progress-label');
 
     if (!isLocal) {
         localWarning.style.display = '';
-        forcePushBtn.disabled = true;
+        replaceBtn.disabled = true;
+        fullDeployBtn.disabled = true;
+    }
+
+    function showProgress(done, total, label) {
+        progressBox.style.display = '';
+        var pct = total > 0 ? Math.round((done / total) * 100) : 100;
+        progressFill.style.width = pct + '%';
+        progressLabel.textContent = label + ' (' + done + '/' + total + ')';
+    }
+
+    function hideProgress() {
+        progressBox.style.display = 'none';
+        progressFill.style.width = '0%';
     }
 
     var TYPE_LABELS = {
@@ -674,6 +751,32 @@
         });
     });
 
+    /**
+     * Chạy tuần tự nhiều batch nhỏ (mỗi lần gọi 1 request AJAX) cho tới khi
+     * finished=true, cập nhật progress bar sau mỗi batch. `stepTask` nhận
+     * job_id, trả về {done,total,finished,...}; `onDone` nhận response của
+     * batch cuối cùng (finished=true).
+     */
+    function runBatchedJob(stepTask, jobId, label, onDone, onError) {
+        post(stepTask, [['job_id', jobId]]).then(function (data) {
+            if (data.status !== 'success') {
+                hideProgress();
+                onError(data.message || 'unknown');
+                return;
+            }
+            showProgress(data.done, data.total, label);
+            if (data.finished) {
+                hideProgress();
+                onDone(data);
+            } else {
+                runBatchedJob(stepTask, jobId, label, onDone, onError);
+            }
+        }).catch(function (e) {
+            hideProgress();
+            onError(String(e));
+        });
+    }
+
     syncBtn.addEventListener('click', function () {
         if (!window.confirm('Sync now? Files about to be overwritten will be backed up automatically first.')) {
             return;
@@ -686,69 +789,133 @@
             }
         });
 
-        setStatus('Syncing...', false);
+        setStatus('Starting sync...', false);
         syncBtn.disabled = true;
-        post('ftpsyncsyncnow', fields).then(function (data) {
+        post('ftpsyncsyncstart', fields).then(function (data) {
             if (data.status !== 'success') {
                 setStatus('Error: ' + (data.message || 'unknown'), true);
+                syncBtn.disabled = !isLocal;
                 return;
             }
-            var msg = 'Applied ' + data.applied + ' change(s), skipped ' + data.skipped + '.';
-            if (data.backup) {
-                msg += ' Backup: ' + data.backup;
+            if (data.total === 0) {
+                setStatus('Nothing to sync (no rows had an action selected).', false);
+                syncBtn.disabled = !isLocal;
+                return;
             }
-            if (data.errors && Object.keys(data.errors).length > 0) {
-                msg += ' ' + Object.keys(data.errors).length + ' file(s) failed (see console).';
-                console.error('FTP Sync errors:', data.errors);
-            }
-            setStatus(msg, false);
-            results.style.display = 'none';
+            showProgress(0, data.total, 'Syncing');
+            runBatchedJob('ftpsyncsyncstep', data.job_id, 'Syncing', function (finalData) {
+                var msg = 'Applied ' + finalData.applied + ' change(s), skipped ' + finalData.skipped + '.';
+                if (finalData.backup) {
+                    msg += ' Backup: ' + finalData.backup;
+                }
+                if (finalData.errors && Object.keys(finalData.errors).length > 0) {
+                    msg += ' ' + Object.keys(finalData.errors).length + ' file(s) failed (see console).';
+                    console.error('FTP Sync errors:', finalData.errors);
+                }
+                setStatus(msg, false);
+                results.style.display = 'none';
+                syncBtn.disabled = !isLocal;
+            }, function (message) {
+                setStatus('Error: ' + message, true);
+                syncBtn.disabled = !isLocal;
+            });
         }).catch(function (e) {
             setStatus('Error: ' + e, true);
-        }).finally(function () {
             syncBtn.disabled = !isLocal;
         });
     });
 
     var FORCE_PUSH_CONFIRM_TOKEN = 'CONFIRMED';
     var confirmModal = document.getElementById('sc-confirm-modal');
+    var confirmTitleEl = document.getElementById('sc-confirm-title');
+    var confirmDescEl = document.getElementById('sc-confirm-desc');
     var confirmYesBtn = document.getElementById('sc-confirm-yes');
     var confirmNoBtn = document.getElementById('sc-confirm-no');
 
-    function runForcePushAll(kinds) {
-        var fields = kinds.map(function (kind) { return ['kinds[]', kind]; });
+    var PUSH_MODES = {
+        replace: {
+            title: 'Confirm: replace local sync to hosting',
+            desc: 'This will <b>DELETE ALL</b> files currently on Hosting (within the categories you have checked above), ' +
+                'then upload everything from Local to replace them. Anything that only exists on Hosting (and not on Local) will be lost — ' +
+                'the system will back up the Hosting copy before deleting, but you should still make sure Local is the correct version.',
+            btn: replaceBtn,
+            startTask: 'ftpsyncpushstart',
+            stepTask: 'ftpsyncpushstep',
+            needsKinds: true
+        },
+        full: {
+            title: 'Confirm: full deploy to hosting',
+            desc: 'This <b>IGNORES the categories checked above entirely</b> — it scans the WHOLE site and bundles everything needed to run it ' +
+                '(code, content, dependencies), excluding only what has no effect on the running site (tests, .git, dev docs, node_modules, ' +
+                'runtime caches, ...). It deletes the corresponding files currently on Hosting, then uploads everything as ONE .zip file — ' +
+                'you then need to extract it yourself on hosting (File Manager / SSH / etc), it is NOT auto-extracted.',
+            btn: fullDeployBtn,
+            startTask: 'ftpsyncfulldeploystart',
+            stepTask: 'ftpsyncfulldeploystep',
+            needsKinds: false
+        }
+    };
+
+    function runPushJob(mode, kinds) {
+        var config = PUSH_MODES[mode];
+        var fields = config.needsKinds ? kinds.map(function (kind) { return ['kinds[]', kind]; }) : [];
         fields.push(['confirm', FORCE_PUSH_CONFIRM_TOKEN]);
 
-        setStatus('Deleting hosting content and re-uploading everything from local — please wait...', false);
-        forcePushBtn.disabled = true;
-        post('ftpsyncforcepushall', fields).then(function (data) {
+        setStatus('Preparing file list...', false);
+        config.btn.disabled = true;
+        post(config.startTask, fields).then(function (data) {
             if (data.status !== 'success') {
                 setStatus('Error: ' + (data.message || 'unknown'), true);
+                config.btn.disabled = !isLocal;
                 return;
             }
-            var msg = 'Deleted ' + data.deleted + ' old file(s) on Hosting and re-uploaded ' + data.uploaded + ' file(s) from Local (' + data.groups + ' categor' + (data.groups === 1 ? 'y' : 'ies') + ').';
-            if (data.backup) {
-                msg += ' Backup: ' + data.backup;
+            if (data.total === 0) {
+                setStatus('Nothing to upload.', false);
+                config.btn.disabled = !isLocal;
+                return;
             }
-            setStatus(msg, false);
-            results.style.display = 'none';
+            showProgress(0, data.total, 'Uploading');
+            runBatchedJob(config.stepTask, data.job_id, 'Uploading', function (finalData) {
+                var msg = 'Deleted ' + finalData.deleted + ' old file(s) on Hosting and uploaded ' + finalData.uploaded + ' file(s) from Local' +
+                    (finalData.groups ? ' (' + finalData.groups + ' categor' + (finalData.groups === 1 ? 'y' : 'ies') + ')' : '') + '.';
+                if (finalData.zip_file) {
+                    msg += ' Bundled into "' + finalData.zip_file + '" at the hosting root — extract it there yourself (File Manager / SSH / etc), it was NOT auto-extracted.';
+                }
+                if (finalData.backup) {
+                    msg += ' Backup: ' + finalData.backup;
+                }
+                setStatus(msg, false);
+                results.style.display = 'none';
+                config.btn.disabled = !isLocal;
+            }, function (message) {
+                setStatus('Error: ' + message, true);
+                config.btn.disabled = !isLocal;
+            });
         }).catch(function (e) {
             setStatus('Error: ' + e, true);
-        }).finally(function () {
-            forcePushBtn.disabled = !isLocal;
+            config.btn.disabled = !isLocal;
         });
     }
 
-    forcePushBtn.addEventListener('click', function () {
-        var kinds = selectedKinds();
-        if (kinds.length === 0) {
-            setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) before uploading.', true);
-            return;
+    function openConfirmModal(mode) {
+        var kinds = [];
+        if (PUSH_MODES[mode].needsKinds) {
+            kinds = selectedKinds();
+            if (kinds.length === 0) {
+                setStatus('Select at least 1 category before uploading.', true);
+                return;
+            }
         }
 
+        confirmModal.dataset.mode = mode;
         confirmModal.dataset.kinds = JSON.stringify(kinds);
+        confirmTitleEl.textContent = PUSH_MODES[mode].title;
+        confirmDescEl.innerHTML = PUSH_MODES[mode].desc;
         confirmModal.style.display = '';
-    });
+    }
+
+    replaceBtn.addEventListener('click', function () { openConfirmModal('replace'); });
+    fullDeployBtn.addEventListener('click', function () { openConfirmModal('full'); });
 
     confirmNoBtn.addEventListener('click', function () {
         confirmModal.style.display = 'none';
@@ -756,9 +923,10 @@
     });
 
     confirmYesBtn.addEventListener('click', function () {
+        var mode = confirmModal.dataset.mode;
         var kinds = JSON.parse(confirmModal.dataset.kinds || '[]');
         confirmModal.style.display = 'none';
-        runForcePushAll(kinds);
+        runPushJob(mode, kinds);
     });
 
     confirmModal.addEventListener('click', function (e) {

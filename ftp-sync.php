@@ -103,12 +103,24 @@ class FTPSyncPlugin extends Plugin
         if ($task === 'ftpsynccheckdiff') {
             $event->stopPropagation();
             $this->handleCheckDiff($controller->post ?? []);
-        } elseif ($task === 'ftpsyncsyncnow') {
+        } elseif ($task === 'ftpsyncsyncstart') {
             $event->stopPropagation();
-            $this->handleSyncNow($controller->post ?? []);
-        } elseif ($task === 'ftpsyncforcepushall') {
+            $this->handleSyncStart($controller->post ?? []);
+        } elseif ($task === 'ftpsyncsyncstep') {
             $event->stopPropagation();
-            $this->handleForcePushAll($controller->post ?? []);
+            $this->handleSyncStep($controller->post ?? []);
+        } elseif ($task === 'ftpsyncpushstart') {
+            $event->stopPropagation();
+            $this->handlePushStart($controller->post ?? []);
+        } elseif ($task === 'ftpsyncpushstep') {
+            $event->stopPropagation();
+            $this->handlePushStep($controller->post ?? []);
+        } elseif ($task === 'ftpsyncfulldeploystart') {
+            $event->stopPropagation();
+            $this->handleFullDeployStart($controller->post ?? []);
+        } elseif ($task === 'ftpsyncfulldeploystep') {
+            $event->stopPropagation();
+            $this->handleFullDeployStep($controller->post ?? []);
         } elseif ($task === 'ftpsynclistbackups') {
             $event->stopPropagation();
             $this->handleListBackups();
@@ -134,7 +146,8 @@ class FTPSyncPlugin extends Plugin
         }
     }
 
-    private function handleSyncNow(array $post): void
+    /** Bước 1/2 của "Sync now": xây hàng đợi thao tác, trả về job_id + tổng số để UI vẽ progress bar. */
+    private function handleSyncStart(array $post): void
     {
         if (!$this->guardRequest()) {
             return;
@@ -143,7 +156,24 @@ class FTPSyncPlugin extends Plugin
         $resolutions = (array) ($post['resolutions'] ?? []);
 
         try {
-            $result = $this->syncManager()->syncNow($resolutions);
+            $result = $this->syncManager()->startSyncJob($resolutions);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 2/2: xử lý 1 batch của job "Sync now" — UI gọi lặp lại tới khi finished=true. */
+    private function handleSyncStep(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $jobId = (string) ($post['job_id'] ?? '');
+
+        try {
+            $result = $this->syncManager()->stepSyncJob($jobId);
             $this->grav['admin']->json_response = ['status' => 'success'] + $result;
         } catch (\Throwable $e) {
             $this->jsonError($e->getMessage());
@@ -158,7 +188,8 @@ class FTPSyncPlugin extends Plugin
      */
     private const FORCE_PUSH_CONFIRM_PHRASE = 'CONFIRMED';
 
-    private function handleForcePushAll(array $post): void
+    /** Bước 1/2 của "Replace local sync to hosting" / "Full deploy to hosting": xây hàng đợi xoá+upload. */
+    private function handlePushStart(array $post): void
     {
         if (!$this->guardRequest()) {
             return;
@@ -173,7 +204,66 @@ class FTPSyncPlugin extends Plugin
         $kinds = array_values((array) ($post['kinds'] ?? []));
 
         try {
-            $result = $this->syncManager()->forcePushAll($kinds);
+            $result = $this->syncManager()->startPushJob($kinds);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 2/2: xử lý 1 batch của job push — UI gọi lặp lại tới khi finished=true. */
+    private function handlePushStep(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $jobId = (string) ($post['job_id'] ?? '');
+
+        try {
+            $result = $this->syncManager()->stepPushJob($jobId);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /**
+     * Bước 1/2 của "Full deploy to hosting": bỏ qua hoàn toàn checkbox/
+     * sync_plugins, tự quét toàn bộ GRAV_ROOT. Dùng chung confirm phrase
+     * với handlePushStart() vì cùng mức độ nguy hiểm (xoá + upload).
+     */
+    private function handleFullDeployStart(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $confirm = trim((string) ($post['confirm'] ?? ''));
+        if ($confirm !== self::FORCE_PUSH_CONFIRM_PHRASE) {
+            $this->jsonError('Confirmation mismatch — upload cancelled for safety.');
+            return;
+        }
+
+        try {
+            $result = $this->syncManager()->startFullDeployJob();
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 2/2: xử lý 1 batch của job full-deploy — UI gọi lặp lại tới khi finished=true. */
+    private function handleFullDeployStep(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $jobId = (string) ($post['job_id'] ?? '');
+
+        try {
+            $result = $this->syncManager()->stepFullDeployJob($jobId);
             $this->grav['admin']->json_response = ['status' => 'success'] + $result;
         } catch (\Throwable $e) {
             $this->jsonError($e->getMessage());

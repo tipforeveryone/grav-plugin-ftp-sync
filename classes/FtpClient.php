@@ -132,8 +132,12 @@ class FtpClient
     public function upload(string $localPath, string $remotePath): void
     {
         $this->ensureRemoteDir(dirname($remotePath));
-        if (!@ftp_put($this->conn, $remotePath, $localPath, FTP_BINARY)) {
-            throw new \RuntimeException("Could not upload file to remote: {$remotePath}");
+
+        error_clear_last();
+        $ok = @ftp_put($this->conn, $remotePath, $localPath, FTP_BINARY);
+        if (!$ok) {
+            $reason = error_get_last()['message'] ?? 'unknown FTP error';
+            throw new \RuntimeException("Could not upload file to remote: {$remotePath} ({$reason})");
         }
     }
 
@@ -188,7 +192,12 @@ class FtpClient
         }
     }
 
-    /** Tạo thư mục remote đệ quy, bỏ qua nếu đã tồn tại. */
+    /**
+     * Tạo thư mục remote đệ quy, bỏ qua nếu đã tồn tại. Nếu 1 segment vừa
+     * không chdir được vừa không mkdir được (quyền, quota, tên không hợp
+     * lệ...), ném lỗi rõ ràng ngay tại đây thay vì để nó âm thầm trôi tới
+     * lúc ftp_put thất bại ở bước sau với thông báo mơ hồ.
+     */
     public function ensureRemoteDir(string $remoteDir): void
     {
         $remoteDir = trim($remoteDir, '/');
@@ -199,8 +208,15 @@ class FtpClient
         $path = '';
         foreach (explode('/', $remoteDir) as $part) {
             $path .= '/' . $part;
-            if (!@ftp_chdir($this->conn, $path)) {
-                @ftp_mkdir($this->conn, $path);
+            if (@ftp_chdir($this->conn, $path)) {
+                continue;
+            }
+
+            error_clear_last();
+            $mkdirOk = @ftp_mkdir($this->conn, $path);
+            if ($mkdirOk === false && !@ftp_chdir($this->conn, $path)) {
+                $reason = error_get_last()['message'] ?? 'unknown FTP error';
+                throw new \RuntimeException("Could not create remote directory: {$path} ({$reason})");
             }
         }
     }
