@@ -1,68 +1,68 @@
 # FTP Sync
 
-Plugin Grav cung cấp 1 trang riêng trong Admin Panel để đồng bộ nội dung site giữa môi trường local (DDEV) và hosting qua FTP/FTPS — không cần Git/SSH trên hosting, phù hợp cho các gói hosting shared chỉ có FTP.
+A Grav plugin that adds a dedicated Admin Panel page to sync site content between a local (DDEV) environment and hosting over FTP/FTPS — no Git or SSH required on the hosting side, which makes it a good fit for shared hosting plans that only offer FTP.
 
-## Tính năng
+## Features
 
-- **Check differences**: quét local + hosting, so khớp theo `mtime` + `size`, phát hiện file mới/đã xoá/xung đột (sửa ở cả 2 bên) theo từng nhóm nội dung (Pages, Themes, Plugins, Config, Accounts).
-- **Sync now**: áp dụng lựa chọn của bạn cho từng file (giữ bản Local / giữ bản Hosting / xoá 1 trong 2 bên) sau khi đã Check differences.
-- **Replace local sync to hosting**: xoá toàn bộ file hiện có trên hosting (trong các nhóm đã chọn) rồi upload lại toàn bộ từ local — dùng khi muốn "làm mới" hosting theo đúng local.
-- **Full deploy to hosting**: bỏ qua hoàn toàn checkbox/cấu hình chọn lọc — tự quét **toàn bộ site** (`system/`, `vendor/`, mọi nội dung `user/`, file gốc `index.php`/`.htaccess`...), loại trừ đúng những gì không ảnh hưởng đến việc site chạy được (file dev/test/docs, cache runtime, `.git`...). Xoá file tương ứng trên hosting, nén toàn bộ phần còn lại thành **1 file `.zip` duy nhất**, upload lên gốc hosting. Dùng khi deploy site lên hosting mới hoàn toàn hoặc khi hosting đã "hỏng/rác" cần làm mới sạch từ đầu. **Bạn cần tự giải nén file zip này trên hosting** (File Manager / SSH) — plugin không tự động giải nén.
-- **Backup tự động**: trước khi ghi đè hoặc xoá bất kỳ file nào trên hosting, bản cũ được tự động nén vào `user/data/ftp-sync/backups/*.zip`. Có thể xem/xoá các bản backup ngay trong trang Admin.
-- **Progress bar theo tiến trình thật**: các thao tác upload/sync nhiều file được chia thành nhiều batch nhỏ (AJAX tuần tự), không bị timeout với site lớn.
-- **Tự phát hiện môi trường local**: chỉ cho phép chạy khi phát hiện thư mục `.ddev/` ở gốc project — trên bản deploy thật ở hosting, mọi thao tác của plugin tự động bị khoá (không bao giờ dùng thông tin FTP từ chính server production).
+- **Check differences**: scans local + hosting, compares by `mtime` + `size`, and reports new/deleted/conflicting files (changed on both sides) per content group (Pages, Themes, Plugins, Config, Accounts).
+- **Sync now**: applies your per-file choice (keep Local / keep Hosting / delete on either side) after running Check differences.
+- **Replace local sync to hosting**: deletes everything currently on hosting (within the checked groups) and re-uploads everything from local — use this to make hosting match local exactly.
+- **Full deploy to hosting**: ignores the checkboxes/config entirely — scans the **whole site** (`system/`, `vendor/`, all of `user/`, root files like `index.php`/`.htaccess`...), excluding only what has no effect on the running site (dev/test/docs files, runtime caches, `.git`...). Deletes the corresponding content on hosting, bundles everything else into **one `.zip` file**, and uploads it to the hosting root. Use this for a brand-new hosting deploy or to fully reset a broken/messy hosting copy. **You need to extract the zip yourself on hosting** (File Manager / SSH) — the plugin does not auto-extract it.
+- **Automatic backups**: before overwriting or deleting any file on hosting, the previous version is automatically zipped into `user/data/ftp-sync/backups/*.zip`. Backups can be viewed/deleted right from the Admin page.
+- **Real progress bars**: multi-file uploads/syncs are split into small sequential AJAX batches instead of one long-running request, so large sites don't time out.
+- **Automatic local-environment detection**: every action is locked unless a `.ddev/` folder is detected at the project root — on a live hosting copy of this same plugin, nothing ever runs (FTP credentials are never exercised from production).
 
-## Yêu cầu
+## Requirements
 
-- Grav >= 1.7.0, kèm plugin **Admin**.
-- PHP extension `ftp` (bật sẵn trong hầu hết cấu hình PHP).
-- Tài khoản FTP/FTPS còn hiệu lực trên hosting đích.
-- Chạy trên môi trường local có `.ddev/` (hoặc bật `force_allow_remote` nếu thực sự muốn bỏ qua kiểm tra này — không khuyến khích).
-- Quyền `admin.super` trên tài khoản Admin đang đăng nhập.
+- Grav >= 1.7.0, with the **Admin** plugin.
+- PHP `ftp` extension (enabled by default in most PHP setups).
+- A valid FTP/FTPS account on the target hosting.
+- A local environment with `.ddev/` present (or `force_allow_remote` enabled if you really want to bypass this check — not recommended).
+- `admin.super` permission on the logged-in Admin account.
 
-## Cài đặt
+## Installation
 
-Plugin nằm sẵn trong `user/plugins/ftp-sync/` của repo này (không qua GPM). Sau khi kéo code về, chỉ cần đảm bảo plugin đang **Enabled** trong Admin Panel (`Admin > Plugins > FTP Sync`).
+The plugin already lives in `user/plugins/ftp-sync/` in this repo (not installed via GPM). After pulling the code, just make sure it's **Enabled** in the Admin Panel (`Admin > Plugins > FTP Sync`).
 
-## Cấu hình
+## Configuration
 
-Vào `Admin > Plugins > FTP Sync`, điền các mục:
+Go to `Admin > Plugins > FTP Sync` and fill in:
 
-| Field | Mô tả |
+| Field | Description |
 |---|---|
-| **Plugin status** | Bật/tắt toàn bộ plugin |
-| **Allow running even when not detected as local** | Bỏ qua kiểm tra môi trường local — **không khuyến khích**, chỉ bật nếu bạn hiểu rõ rủi ro |
-| **Auto-backup before overwriting** | Bật/tắt cơ chế backup tự động trước khi ghi đè/xoá |
-| **Root directory on hosting** | Đường dẫn FTP tuyệt đối trùng với webroot của site trên hosting, vd `/public_html/eznotary` |
-| **Plugins to sync** | Danh sách plugin (trong `user/plugins/`) muốn đồng bộ qua "Sync now"/"Replace local sync" — để trống = tự động đồng bộ TẤT CẢ plugin. Không ảnh hưởng "Full deploy" (luôn lấy hết). |
-| **File/folder patterns to skip when syncing** | Danh sách pattern loại trừ, hỗ trợ `*`, áp dụng cho "Check differences"/"Sync now"/"Replace local sync" và cũng được "Full deploy" tôn trọng thêm |
-| **FTP Host / Port / Username / Password** | Thông tin kết nối FTP |
-| **Use FTPS** | Bật nếu hosting yêu cầu FTP over SSL |
-| **Passive mode** | Hầu hết hosting shared cần bật passive mode |
+| **Plugin status** | Enable/disable the whole plugin |
+| **Allow running even when not detected as local** | Bypasses the local-environment check — **not recommended**, only enable if you understand the risk |
+| **Auto-backup before overwriting** | Enable/disable the automatic backup mechanism |
+| **Root directory on hosting** | Absolute FTP path matching the site's webroot on hosting, e.g. `/public_html/eznotary` |
+| **Plugins to sync** | List of plugin names (under `user/plugins/`) to sync via "Sync now"/"Replace local sync" — leave empty to auto-sync ALL plugins. Does not affect "Full deploy" (which always includes everything). |
+| **File/folder patterns to skip when syncing** | Comma-separated exclude patterns, supports `*`, applies to "Check differences"/"Sync now"/"Replace local sync" and is also respected on top of "Full deploy"'s own exclusions |
+| **FTP Host / Port / Username / Password** | FTP connection details |
+| **Use FTPS** | Enable if hosting requires FTP over SSL |
+| **Passive mode** | Most shared hosting requires passive mode enabled |
 
-## Cách dùng
+## Usage
 
-1. Vào **Admin > FTP Sync** (menu bên trái, icon trao đổi ⇄).
-2. Chọn các nhóm nội dung muốn thao tác ở khung bên trái: **Pages / Themes / Plugins / Config / Accounts**.
-3. Chọn hành động ở khung bên phải:
-   - **Check differences** → xem danh sách file khác biệt → chọn hành động cho từng dòng (hoặc bulk-apply theo nhóm chọn) → **Sync now**.
-   - **Replace local sync to hosting** → xác nhận trong hộp thoại cảnh báo → hosting sẽ khớp 100% với local (trong các nhóm đã chọn).
-   - **Full deploy to hosting** → xác nhận trong hộp thoại cảnh báo → toàn bộ site được đóng gói thành 1 file `.zip` và upload lên gốc hosting → **bạn tự giải nén** file đó trên hosting.
-4. **Show backups** → xem/xoá các bản backup đã tạo tự động.
+1. Go to **Admin > FTP Sync** (left menu, exchange ⇄ icon).
+2. Pick the content groups you want to act on in the left panel: **Pages / Themes / Plugins / Config / Accounts**.
+3. Pick an action in the right panel:
+   - **Check differences** → review the list of differing files → choose an action per row (or bulk-apply to a selection) → **Sync now**.
+   - **Replace local sync to hosting** → confirm in the warning dialog → hosting will match local 100% (within the checked groups).
+   - **Full deploy to hosting** → confirm in the warning dialog → the entire site is bundled into one `.zip` and uploaded to the hosting root → **you extract it yourself** on hosting.
+4. **Show backups** → view/delete automatically created backups.
 
-### Lưu ý khi dùng "Full deploy to hosting"
+### Notes on "Full deploy to hosting"
 
-- Rất phù hợp cho lần deploy đầu tiên lên hosting mới, hoặc khi cần "reset" hosting về đúng trạng thái local.
-- File `.zip` được đặt tên `deploy-<ngày giờ>.zip` ngay tại thư mục gốc hosting — giải nén đè lên (không cần tạo thư mục con), rồi xoá file zip đi.
-- Đảm bảo hosting hỗ trợ PHP tương thích (khuyến nghị PHP >= 8.1, khớp với môi trường build local) và có sẵn extension `zip` để tự giải nén được.
-- Sau khi giải nén, vào `/admin` kiểm tra trang "Essential Folders" (nếu có plugin `problems`) để chắc các thư mục `cache/logs/tmp/backup/images/assets` tồn tại và ghi được.
+- Great for a first-time deploy to a fresh hosting account, or to fully reset hosting to match local.
+- The zip is named `deploy-<timestamp>.zip` and placed right at the hosting root — extract it in place (no need to create a subfolder), then delete the zip.
+- Make sure hosting runs a compatible PHP version (PHP >= 8.1 recommended, matching the local build environment) and has the `zip` extension available to extract it.
+- After extracting, check the "Essential Folders" page in `/admin` (if the `problems` plugin is installed) to confirm `cache/logs/tmp/backup/images/assets` exist and are writable.
 
-## Bảo mật
+## Security
 
-- Mật khẩu FTP lưu dạng plaintext trong config (`user/config/plugins/ftp-sync.yaml`) — file này **luôn bị loại trừ** khỏi mọi lần sync/deploy để tránh vô tình đẩy lên hosting.
-- Các file nhạy cảm khác (`security.yaml`, `security-private.php`, `versions.yaml`) cũng bị loại trừ mặc định.
-- Mọi thao tác ghi (upload/xoá) đều bị khoá hoàn toàn nếu plugin phát hiện đang chạy trên môi trường không phải local (`.ddev/`) — trừ khi chủ động bật `force_allow_remote`.
+- The FTP password is stored in plaintext in the config (`user/config/plugins/ftp-sync.yaml`) — this file is **always excluded** from every sync/deploy to avoid accidentally uploading it to hosting.
+- Other sensitive files (`security.yaml`, `security-private.php`, `versions.yaml`) are excluded by default too.
+- Every write action (upload/delete) is fully locked unless the plugin detects it's running in a local environment (`.ddev/`) — unless `force_allow_remote` is explicitly enabled.
 
-## Tác giả
+## Author
 
 **tipforeveryone** — MIT License.
