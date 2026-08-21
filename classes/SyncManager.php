@@ -324,59 +324,43 @@ class SyncManager
      *
      * @return array{job_id:string, total:int}
      */
+    /**
+     * "Full deploy" ở đây CHỈ còn nén site thành 1 file .zip local — xoá
+     * file cũ trên hosting và upload lên hosting nay do người dùng tự làm
+     * thủ công (không còn động tới FTP ở bước này), nên không cần xác
+     * nhận nguy hiểm nữa.
+     */
     public function startFullDeployJob(): array
     {
-        $remoteBase = rtrim($this->config['remote_base_path'] ?? '/', '/');
         $localFiles = $this->scanFullDeployLocal();
         if (empty($localFiles)) {
             throw new \RuntimeException('Nothing found to deploy.');
         }
 
-        $ftp = new FtpClient();
-        $this->connectFtp($ftp);
-
-        $deleteOps = [];
-        try {
-            foreach (array_keys($this->scanFullDeployRemote($ftp, $remoteBase)) as $relPath) {
-                $deleteOps[] = $relPath;
-            }
-        } finally {
-            $ftp->close();
-        }
-
         $jobId = bin2hex(random_bytes(8));
         $job = [
             'id' => $jobId,
-            'remote_base' => $remoteBase,
-            'delete_ops' => $deleteOps,
             'zip_ops' => array_keys($localFiles),
             'zip_total' => count($localFiles),
             'zip_path' => null,
             'zip_built' => false,
-            'zip_done' => false,
-            'zip_remote_name' => null,
-            'total' => count($deleteOps) + count($localFiles),
             'done' => 0,
-            'uploaded' => 0,
-            'deleted' => 0,
-            'backup_zip' => null,
-            'backup_has_entries' => false,
         ];
         $this->saveJson($this->dataDir . '/full-deploy-job.json', $job);
 
-        return ['job_id' => $jobId, 'total' => $job['total']];
+        return ['job_id' => $jobId, 'total' => $job['zip_total']];
     }
 
     /**
-     * Bước 2/2: xử lý 1 batch của job full-deploy — theo thứ tự: rút cạn
-     * hàng đợi xoá (backup rồi xoá từng file remote), rồi tới hàng đợi nén
-     * (thêm từng file vào .zip local), cả hai đều theo batch $batchSize
-     * nên UI vẽ được progress real-time xuyên suốt. Chỉ khi zip đã nén
-     * xong hoàn toàn (zip_built=true) mới upload lên hosting — luôn 1 lượt
-     * FTP upload DUY NHẤT vì bản thân file zip không thể chia nhỏ. Gọi lặp
-     * lại tới khi finished=true.
+     * Bước 2/2: xử lý 1 batch nén — mỗi lượt gọi thêm tối đa $batchSize
+     * file vào .zip local (xem addBatchToFullDeployZip()), để UI vẽ
+     * progress real-time thay vì đứng hình khi nén hàng nghìn file cùng
+     * lúc. Khi nén xong hoàn toàn (zip_built=true), đổi tên file .zip
+     * tạm sang tên cuối cùng có mốc thời gian rồi báo finished=true kèm
+     * đường dẫn — người dùng tự tìm file này trong user/data/ftp-sync/
+     * để tự upload lên hosting. Gọi lặp lại tới khi finished=true.
      *
-     * @return array{done:int,total:int,uploaded:int,deleted:int,finished:bool,backup:?string,zip_file:?string}
+     * @return array{done:int,total:int,finished:bool,zip_file:?string}
      */
     public function stepFullDeployJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
     {
@@ -385,57 +369,18 @@ class SyncManager
             throw new \RuntimeException('No such deploy job (it may have finished, been cancelled, or expired).');
         }
 
-        $remoteBase = $job['remote_base'];
-        $ftp = new FtpClient();
-        $this->connectFtp($ftp);
-
-        $backup = $this->openBackupForJob($job);
-
-        $processed = 0;
-
-        try {
-            while ($processed < $batchSize && !empty($job['delete_ops'])) {
-                $relPath = array_shift($job['delete_ops']);
-                $remoteFile = $remoteBase . '/' . $relPath;
-
-                $this->backupRemote($backup, $ftp, $relPath, $remoteFile);
-                $ftp->delete($remoteFile);
-
-                $job['deleted']++;
-                $job['done']++;
-                $processed++;
-            }
-
-            // Phase nén: chạy SAU khi hàng đợi xoá đã rút cạn, nhưng nén
-            // theo từng batch giống hệt phase xoá — mỗi lượt gọi chỉ thêm
-            // tối đa $batchSize file vào file .zip (mở lại bằng CREATE để
-            // ghi tiếp vào zip đã có, không OVERWRITE), để UI vẽ progress
-            // real-time thay vì đứng hình khi nén hàng nghìn file cùng lúc
-            // (nguyên nhân khiến job có thể bị timeout giữa chừng, tạo ra
-            // file zip dở dang khi upload lên hosting).
-            if ($processed < $batchSize && empty($job['delete_ops']) && !empty($job['zip_ops']) && !$job['zip_built']) {
-                $processed += $this->addBatchToFullDeployZip($job, $batchSize - $processed);
-            }
-
-            // Phase upload: 1 lượt duy nhất (1 FTP upload), chỉ chạy sau khi
-            // zip đã nén xong hoàn toàn. Zip đặt ở gốc remote_base_path,
-            // KHÔNG tự giải nén — người dùng tự giải nén thủ công trên
-            // hosting.
-            if ($job['zip_built'] && !$job['zip_done']) {
-                $remoteZipName = 'deploy-' . date('Y-m-d_His') . '.zip';
-                $ftp->upload($job['zip_path'], $remoteBase . '/' . $remoteZipName);
-                @unlink($job['zip_path']);
-                $job['zip_path'] = null;
-                $job['zip_remote_name'] = $remoteZipName;
-                $job['uploaded'] += $job['zip_total'];
-                $job['zip_done'] = true;
-            }
-        } finally {
-            $ftp->close();
+        if (!$job['zip_built']) {
+            $this->addBatchToFullDeployZip($job, $batchSize);
         }
 
-        $finished = empty($job['delete_ops']) && $job['zip_done'];
-        $backupResult = $this->closeBackupForJob($backup, $job, $finished);
+        $finished = $job['zip_built'];
+
+        if ($finished && !empty($job['zip_path'])) {
+            $finalPath = $this->dataDir . '/full-deploy-' . date('Y-m-d_His') . '.zip';
+            if (@rename($job['zip_path'], $finalPath)) {
+                $job['zip_path'] = $finalPath;
+            }
+        }
 
         if ($finished) {
             @unlink($this->dataDir . '/full-deploy-job.json');
@@ -445,12 +390,9 @@ class SyncManager
 
         return [
             'done' => $job['done'],
-            'total' => $job['total'],
-            'uploaded' => $job['uploaded'],
-            'deleted' => $job['deleted'],
+            'total' => $job['zip_total'],
             'finished' => $finished,
-            'backup' => $backupResult ? basename($backupResult) : null,
-            'zip_file' => $job['zip_remote_name'],
+            'zip_file' => $finished ? basename($job['zip_path']) : null,
         ];
     }
 
@@ -735,12 +677,6 @@ class SyncManager
                 $result[$relPath] = ['mtime' => filemtime($fullPath) ?: 0, 'size' => filesize($fullPath) ?: 0];
             }
         }
-    }
-
-    /** Quét remote tương ứng, dùng chung logic loại trừ với scanFullDeployLocal(). */
-    private function scanFullDeployRemote(FtpClient $ftp, string $remoteBase): array
-    {
-        return $ftp->scan($remoteBase, [$this, 'isFullDeployIgnored']);
     }
 
     /**

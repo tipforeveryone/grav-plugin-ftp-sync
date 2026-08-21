@@ -229,19 +229,13 @@ class FTPSyncPlugin extends Plugin
     }
 
     /**
-     * Bước 1/2 của "Full deploy to hosting": bỏ qua hoàn toàn checkbox/
-     * sync_plugins, tự quét toàn bộ GRAV_ROOT. Dùng chung confirm phrase
-     * với handlePushStart() vì cùng mức độ nguy hiểm (xoá + upload).
+     * Bước 1/2 của "Full deploy" — CHỈ nén site thành 1 file .zip local,
+     * không xoá và không upload gì lên hosting (người dùng tự làm 2 việc
+     * đó thủ công), nên không cần xác nhận nguy hiểm như handlePushStart().
      */
     private function handleFullDeployStart(array $post): void
     {
         if (!$this->guardRequest()) {
-            return;
-        }
-
-        $confirm = trim((string) ($post['confirm'] ?? ''));
-        if ($confirm !== self::FORCE_PUSH_CONFIRM_PHRASE) {
-            $this->jsonError('Confirmation mismatch — upload cancelled for safety.');
             return;
         }
 
@@ -253,7 +247,7 @@ class FTPSyncPlugin extends Plugin
         }
     }
 
-    /** Bước 2/2: xử lý 1 batch của job full-deploy — UI gọi lặp lại tới khi finished=true. */
+    /** Bước 2/2: xử lý 1 batch nén của job full-deploy — UI gọi lặp lại tới khi finished=true. */
     private function handleFullDeployStep(array $post): void
     {
         if (!$this->guardRequest()) {

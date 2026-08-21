@@ -11,7 +11,8 @@
 <div id="ftp-sync-app" data-ajax-url="{{ current_url }}.json" data-nonce="{{ admin.getNonce() }}" data-is-local="{{ ftp_sync_is_local() ? '1' : '0' }}">
 
     <style>
-        #ftp-sync-app { overflow: hidden; padding: 0 2rem 3rem 0; }
+        #ftp-sync-app { overflow: hidden; padding: 0 2rem 3rem 2rem; }
+        #ftp-sync-app .notices { padding-left: 0; }
 
         #ftp-sync-app .sc-top {
             display: flex;
@@ -80,14 +81,12 @@
 
         #ftp-sync-app #sc-status:not(:empty) { margin-bottom: 1rem; }
 
-        #ftp-sync-app #sc-replace-sync,
-        #ftp-sync-app #sc-full-deploy {
+        #ftp-sync-app #sc-replace-sync {
             background: #c9544a;
             color: #fff;
             border-color: #a83a32;
         }
-        #ftp-sync-app #sc-replace-sync:hover,
-        #ftp-sync-app #sc-full-deploy:hover { background: #a83a32; }
+        #ftp-sync-app #sc-replace-sync:hover { background: #a83a32; }
 
         #ftp-sync-app #sc-progress { margin: 0 0 1rem; }
         #ftp-sync-app .sc-progress-track {
@@ -346,8 +345,8 @@
                     <i class="fa fa-warning"></i> Replace local sync to hosting
                 </button>
                 <button type="button" class="button" id="sc-full-deploy"
-                        title="Ignores the categories above — bundles the ENTIRE site (minus dev-only files) into one .zip, deletes matching files on hosting, uploads the zip. You extract it yourself on hosting.">
-                    <i class="fa fa-rocket"></i> Full deploy to hosting
+                        title="Ignores the categories above — bundles the ENTIRE site (minus dev-only files) into one .zip in user/data/ftp-sync/. Deleting old files on hosting and uploading the zip are up to you.">
+                    <i class="fa fa-rocket"></i> Compress full site
                 </button>
                 <button type="button" class="button" id="sc-show-backups">
                     <i class="fa fa-archive"></i> Show backups
@@ -844,17 +843,48 @@
             needsKinds: true
         },
         full: {
-            title: 'Confirm: full deploy to hosting',
-            desc: 'This <b>IGNORES the categories checked above entirely</b> — it scans the WHOLE site and bundles everything needed to run it ' +
-                '(code, content, dependencies), excluding only what has no effect on the running site (tests, .git, dev docs, node_modules, ' +
-                'runtime caches, ...). It deletes the corresponding files currently on Hosting, then uploads everything as ONE .zip file — ' +
-                'you then need to extract it yourself on hosting (File Manager / SSH / etc), it is NOT auto-extracted.',
             btn: fullDeployBtn,
             startTask: 'ftpsyncfulldeploystart',
             stepTask: 'ftpsyncfulldeploystep',
             needsKinds: false
         }
     };
+
+    /**
+     * Full deploy giờ CHỈ nén site thành 1 file .zip local (không xoá,
+     * không upload — người dùng tự làm 2 việc đó thủ công), nên không
+     * cần xác nhận nguy hiểm và bỏ qua field 'confirm'.
+     */
+    function runFullDeploy() {
+        var config = PUSH_MODES.full;
+
+        setStatus('Compressing...', false);
+        config.btn.disabled = true;
+        post(config.startTask, []).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                config.btn.disabled = !isLocal;
+                return;
+            }
+            if (data.total === 0) {
+                setStatus('Nothing to compress.', false);
+                config.btn.disabled = !isLocal;
+                return;
+            }
+
+            showProgress(0, data.total, 'Compressing');
+            runBatchedJob(config.stepTask, data.job_id, 'Compressing', function (finalData) {
+                setStatus('Compressed ' + data.total + ' file(s) into "' + finalData.zip_file + '" — find it under user/data/ftp-sync/ and upload it to Hosting yourself.', false);
+                config.btn.disabled = !isLocal;
+            }, function (message) {
+                setStatus('Error: ' + message, true);
+                config.btn.disabled = !isLocal;
+            });
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+            config.btn.disabled = !isLocal;
+        });
+    }
 
     function runPushJob(mode, kinds) {
         var config = PUSH_MODES[mode];
@@ -874,13 +904,11 @@
                 config.btn.disabled = !isLocal;
                 return;
             }
+
             showProgress(0, data.total, 'Uploading');
             runBatchedJob(config.stepTask, data.job_id, 'Uploading', function (finalData) {
                 var msg = 'Deleted ' + finalData.deleted + ' old file(s) on Hosting and uploaded ' + finalData.uploaded + ' file(s) from Local' +
                     (finalData.groups ? ' (' + finalData.groups + ' categor' + (finalData.groups === 1 ? 'y' : 'ies') + ')' : '') + '.';
-                if (finalData.zip_file) {
-                    msg += ' Bundled into "' + finalData.zip_file + '" at the hosting root — extract it there yourself (File Manager / SSH / etc), it was NOT auto-extracted.';
-                }
                 if (finalData.backup) {
                     msg += ' Backup: ' + finalData.backup;
                 }
@@ -915,7 +943,7 @@
     }
 
     replaceBtn.addEventListener('click', function () { openConfirmModal('replace'); });
-    fullDeployBtn.addEventListener('click', function () { openConfirmModal('full'); });
+    fullDeployBtn.addEventListener('click', runFullDeploy);
 
     confirmNoBtn.addEventListener('click', function () {
         confirmModal.style.display = 'none';
