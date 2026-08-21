@@ -350,6 +350,9 @@ class SyncManager
             'remote_base' => $remoteBase,
             'delete_ops' => $deleteOps,
             'zip_ops' => array_keys($localFiles),
+            'zip_total' => count($localFiles),
+            'zip_path' => null,
+            'zip_built' => false,
             'zip_done' => false,
             'zip_remote_name' => null,
             'total' => count($deleteOps) + count($localFiles),
@@ -365,10 +368,12 @@ class SyncManager
     }
 
     /**
-     * Bước 2/2: xử lý 1 batch của job full-deploy — rút cạn hàng đợi xoá
-     * (backup rồi xoá từng file remote, theo batch như bình thường), rồi
-     * tới lượt "phase zip" (nén local + 1 FTP upload DUY NHẤT, không giới
-     * hạn theo $batchSize vì bản thân nó đã là 1 thao tác gộp). Gọi lặp
+     * Bước 2/2: xử lý 1 batch của job full-deploy — theo thứ tự: rút cạn
+     * hàng đợi xoá (backup rồi xoá từng file remote), rồi tới hàng đợi nén
+     * (thêm từng file vào .zip local), cả hai đều theo batch $batchSize
+     * nên UI vẽ được progress real-time xuyên suốt. Chỉ khi zip đã nén
+     * xong hoàn toàn (zip_built=true) mới upload lên hosting — luôn 1 lượt
+     * FTP upload DUY NHẤT vì bản thân file zip không thể chia nhỏ. Gọi lặp
      * lại tới khi finished=true.
      *
      * @return array{done:int,total:int,uploaded:int,deleted:int,finished:bool,backup:?string,zip_file:?string}
@@ -401,22 +406,35 @@ class SyncManager
                 $processed++;
             }
 
-            // Phase zip: chỉ chạy sau khi hàng đợi xoá đã rút cạn — 1 lượt
-            // duy nhất (nén local + 1 FTP upload), không bị giới hạn bởi
-            // $batchSize. Zip đặt ở gốc remote_base_path, KHÔNG tự giải nén
-            // — người dùng tự giải nén thủ công trên hosting.
-            if (empty($job['delete_ops']) && !empty($job['zip_ops']) && !$job['zip_done']) {
-                $job['zip_remote_name'] = $this->buildAndUploadFullDeployZip($job, $ftp, $remoteBase);
-                $job['uploaded'] += count($job['zip_ops']);
-                $job['done'] += count($job['zip_ops']);
-                $job['zip_ops'] = [];
+            // Phase nén: chạy SAU khi hàng đợi xoá đã rút cạn, nhưng nén
+            // theo từng batch giống hệt phase xoá — mỗi lượt gọi chỉ thêm
+            // tối đa $batchSize file vào file .zip (mở lại bằng CREATE để
+            // ghi tiếp vào zip đã có, không OVERWRITE), để UI vẽ progress
+            // real-time thay vì đứng hình khi nén hàng nghìn file cùng lúc
+            // (nguyên nhân khiến job có thể bị timeout giữa chừng, tạo ra
+            // file zip dở dang khi upload lên hosting).
+            if ($processed < $batchSize && empty($job['delete_ops']) && !empty($job['zip_ops']) && !$job['zip_built']) {
+                $processed += $this->addBatchToFullDeployZip($job, $batchSize - $processed);
+            }
+
+            // Phase upload: 1 lượt duy nhất (1 FTP upload), chỉ chạy sau khi
+            // zip đã nén xong hoàn toàn. Zip đặt ở gốc remote_base_path,
+            // KHÔNG tự giải nén — người dùng tự giải nén thủ công trên
+            // hosting.
+            if ($job['zip_built'] && !$job['zip_done']) {
+                $remoteZipName = 'deploy-' . date('Y-m-d_His') . '.zip';
+                $ftp->upload($job['zip_path'], $remoteBase . '/' . $remoteZipName);
+                @unlink($job['zip_path']);
+                $job['zip_path'] = null;
+                $job['zip_remote_name'] = $remoteZipName;
+                $job['uploaded'] += $job['zip_total'];
                 $job['zip_done'] = true;
             }
         } finally {
             $ftp->close();
         }
 
-        $finished = empty($job['delete_ops']) && empty($job['zip_ops']);
+        $finished = empty($job['delete_ops']) && $job['zip_done'];
         $backupResult = $this->closeBackupForJob($backup, $job, $finished);
 
         if ($finished) {
@@ -636,34 +654,48 @@ class SyncManager
     private const FULL_DEPLOY_REQUIRED_EMPTY_DIRS = ['cache', 'logs', 'tmp', 'backup', 'images', 'assets'];
 
     /**
-     * Nén toàn bộ $job['zip_ops'] (relPath tương đối GRAV_ROOT, VD
-     * "system/src/.../Client.php", "user/pages/...", "index.php") thành 1
-     * file .zip local, rồi upload đúng 1 lần qua FTP lên gốc $remoteBase.
-     * KHÔNG tự giải nén — người dùng tự giải nén thủ công trên hosting.
-     * Trả về tên file zip đã upload (để báo người dùng biết cần giải nén
-     * file nào).
+     * Thêm tối đa $limit file từ đầu $job['zip_ops'] (relPath tương đối
+     * GRAV_ROOT, VD "system/src/.../Client.php", "user/pages/...",
+     * "index.php") vào file .zip local của job, rồi cập nhật $job theo
+     * tham chiếu (done/zip_ops/zip_path/zip_built). File zip được mở lại
+     * bằng CREATE (không OVERWRITE) ở mỗi lượt gọi để ghi tiếp vào đúng
+     * file đã có — cho phép nén rải qua nhiều request thay vì 1 lần duy
+     * nhất cho hàng nghìn file (dễ chạm max_execution_time trên hosting
+     * rẻ, tạo ra zip dở dang). Khi $job['zip_ops'] rút cạn ở lượt gọi này,
+     * bổ sung luôn các thư mục rỗng bắt buộc rồi đánh dấu zip_built=true.
+     *
+     * @return int Số file thực sự đã thêm vào zip ở lượt gọi này.
      */
-    private function buildAndUploadFullDeployZip(array $job, FtpClient $ftp, string $remoteBase): string
+    private function addBatchToFullDeployZip(array &$job, int $limit): int
     {
-        $zipPath = $this->dataDir . '/deploy-' . $job['id'] . '.zip';
+        if ($job['zip_path'] === null) {
+            $job['zip_path'] = $this->dataDir . '/deploy-' . $job['id'] . '.zip';
+        }
 
         $zip = new \ZipArchive();
-        $zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
-        foreach ($job['zip_ops'] as $relPath) {
+        $openResult = $zip->open($job['zip_path'], \ZipArchive::CREATE);
+        if ($openResult !== true) {
+            throw new \RuntimeException('Could not open deploy zip for writing (code ' . $openResult . ').');
+        }
+
+        $added = 0;
+        while ($added < $limit && !empty($job['zip_ops'])) {
+            $relPath = array_shift($job['zip_ops']);
             $zip->addFile(GRAV_ROOT . '/' . $relPath, $relPath);
+            $job['done']++;
+            $added++;
         }
-        foreach (self::FULL_DEPLOY_REQUIRED_EMPTY_DIRS as $dir) {
-            $zip->addEmptyDir($dir);
+
+        if (empty($job['zip_ops'])) {
+            foreach (self::FULL_DEPLOY_REQUIRED_EMPTY_DIRS as $dir) {
+                $zip->addEmptyDir($dir);
+            }
+            $job['zip_built'] = true;
         }
+
         $zip->close();
 
-        try {
-            $remoteZipName = 'deploy-' . date('Y-m-d_His') . '.zip';
-            $ftp->upload($zipPath, $remoteBase . '/' . $remoteZipName);
-            return $remoteZipName;
-        } finally {
-            @unlink($zipPath);
-        }
+        return $added;
     }
 
     /**
