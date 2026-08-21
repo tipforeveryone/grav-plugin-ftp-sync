@@ -40,10 +40,18 @@ class SyncManager
 
     /**
      * Loại trừ theo TÊN THƯ MỤC ở BẤT KỲ cấp nào (kể cả sâu trong vendor/
-     * system) — chỉ dùng cho tên rõ ràng là artefact dev (test/doc/CI),
-     * không bao giờ là tên thư mục runtime hợp lệ.
+     * system) — CHỈ dùng cho tên chắc chắn không bao giờ trùng với tên 1
+     * gói Composer thật (org hoặc package name), vì khớp theo tên đơn lẻ
+     * này không phân biệt được "thư mục dev artefact" với "thư mục gói
+     * cần cho runtime". Từng có 'phpstan' ở đây — dùng để loại
+     * tests/phpstan/ (đã bị loại ở cấp gốc qua 'tests' rồi nên hoàn toàn
+     * dư thừa), nhưng lại vô tình khớp luôn vendor/phpstan/ — namespace
+     * Composer thật của gói phpstan/phpstan, gói này khai báo bootstrap.php
+     * là "files" autoload nên bị Composer require() ở MỌI request bất kể
+     * có dùng PHPStan hay không → thiếu file là sập toàn site (đã xảy ra
+     * trên hosting). Cân nhắc kỹ trước khi thêm tên mới vào đây.
      */
-    private const FULL_DEPLOY_SUBTREE_EXCLUDE = ['.git', '.ddev', 'node_modules', 'tests', 'test', 'docs', 'doc', 'examples', 'example', '.github', 'phpstan'];
+    private const FULL_DEPLOY_SUBTREE_EXCLUDE = ['.git', '.ddev', 'node_modules', 'tests', 'test', 'docs', 'doc', 'examples', 'example', '.github'];
 
     private array $config;
     private string $dataDir;
