@@ -81,12 +81,25 @@
 
         #ftp-sync-app #sc-status:not(:empty) { margin-bottom: 1rem; }
 
+        #ftp-sync-app .sc-hint {
+            margin: -0.5rem 0 1rem;
+            font-size: 0.85rem;
+            color: #555;
+        }
+
         #ftp-sync-app #sc-replace-sync {
             background: #c9544a;
             color: #fff;
             border-color: #a83a32;
         }
         #ftp-sync-app #sc-replace-sync:hover { background: #a83a32; }
+
+        #ftp-sync-app #sc-full-deploy-mark-synced.sc-ready {
+            background: #2c5;
+            color: #fff;
+            border-color: #229944;
+        }
+        #ftp-sync-app #sc-full-deploy-mark-synced.sc-ready:hover { background: #229944; }
 
         #ftp-sync-app #sc-progress { margin: 0 0 1rem; }
         #ftp-sync-app .sc-progress-track {
@@ -107,6 +120,10 @@
             font-size: 0.85rem;
             color: #555;
             text-align: center;
+        }
+        #ftp-sync-app #sc-cancel-compress {
+            display: block;
+            margin: 0.5rem auto 0;
         }
 
         #ftp-sync-app .sc-modal-overlay {
@@ -348,6 +365,10 @@
                         title="Ignores the categories above — bundles the ENTIRE site (minus dev-only files) into one .zip in user/data/ftp-sync/. Deleting old files on hosting and uploading the zip are up to you.">
                     <i class="fa fa-rocket"></i> Compress full site
                 </button>
+                <button type="button" class="button" id="sc-full-deploy-mark-synced" style="display:none"
+                        title="Click ONLY after you have manually uploaded and extracted this zip on Hosting. Resets the sync baseline so 'Check differences' won't flag files whose content is unchanged but got a new mtime from extraction.">
+                    <i class="fa fa-check"></i> Mark as deployed
+                </button>
                 <button type="button" class="button" id="sc-show-backups">
                     <i class="fa fa-archive"></i> Show backups
                 </button>
@@ -358,6 +379,9 @@
     <div id="sc-progress" style="display:none">
         <div class="sc-progress-track"><div class="sc-progress-fill"></div></div>
         <div class="sc-progress-label"></div>
+        <button type="button" class="button" id="sc-cancel-compress" style="display:none">
+            <i class="fa fa-times"></i> Cancel compressing
+        </button>
     </div>
 
     <div id="sc-backups" style="display:none">
@@ -386,6 +410,9 @@
     </div>
 
     <div id="sc-status"></div>
+    <div id="sc-full-deploy-hint" class="sc-hint" style="display:none">
+        <i class="fa fa-info-circle"></i> Đã tự tay upload + giải nén file zip này lên Hosting? Bấm <b>"Mark as deployed"</b> để cập nhật lại trạng thái đồng bộ.
+    </div>
 
     <div id="sc-confirm-modal" class="sc-modal-overlay" style="display:none">
         <div class="sc-modal-box">
@@ -476,6 +503,8 @@
     var syncBtn = document.getElementById('sc-sync-now');
     var replaceBtn = document.getElementById('sc-replace-sync');
     var fullDeployBtn = document.getElementById('sc-full-deploy');
+    var fullDeployMarkBtn = document.getElementById('sc-full-deploy-mark-synced');
+    var fullDeployHint = document.getElementById('sc-full-deploy-hint');
     var statusEl = document.getElementById('sc-status');
     var results = document.getElementById('sc-results');
     var table = document.getElementById('sc-diff-table');
@@ -494,11 +523,13 @@
     var progressBox = document.getElementById('sc-progress');
     var progressFill = progressBox.querySelector('.sc-progress-fill');
     var progressLabel = progressBox.querySelector('.sc-progress-label');
+    var cancelCompressBtn = document.getElementById('sc-cancel-compress');
 
     if (!isLocal) {
         localWarning.style.display = '';
         replaceBtn.disabled = true;
         fullDeployBtn.disabled = true;
+        fullDeployMarkBtn.disabled = true;
     }
 
     function showProgress(done, total, label) {
@@ -511,6 +542,7 @@
     function hideProgress() {
         progressBox.style.display = 'none';
         progressFill.style.width = '0%';
+        cancelCompressBtn.style.display = 'none';
     }
 
     var TYPE_LABELS = {
@@ -755,9 +787,18 @@
      * finished=true, cập nhật progress bar sau mỗi batch. `stepTask` nhận
      * job_id, trả về {done,total,finished,...}; `onDone` nhận response của
      * batch cuối cùng (finished=true).
+     *
+     * `cancelToken` (tuỳ chọn, dạng {cancelled:false, onCancelled:fn}) cho
+     * phép huỷ giữa chừng: cờ `cancelled` chỉ được đọc SAU KHI request batch
+     * hiện tại đã trả lời xong (không bao giờ huỷ 1 request đang bay), để
+     * tránh đụng độ với server đang ghi file (VD zip của Full deploy).
      */
-    function runBatchedJob(stepTask, jobId, label, onDone, onError) {
+    function runBatchedJob(stepTask, jobId, label, onDone, onError, cancelToken) {
         post(stepTask, [['job_id', jobId]]).then(function (data) {
+            if (cancelToken && cancelToken.cancelled) {
+                cancelToken.onCancelled();
+                return;
+            }
             if (data.status !== 'success') {
                 hideProgress();
                 onError(data.message || 'unknown');
@@ -768,9 +809,13 @@
                 hideProgress();
                 onDone(data);
             } else {
-                runBatchedJob(stepTask, jobId, label, onDone, onError);
+                runBatchedJob(stepTask, jobId, label, onDone, onError, cancelToken);
             }
         }).catch(function (e) {
+            if (cancelToken && cancelToken.cancelled) {
+                cancelToken.onCancelled();
+                return;
+            }
             hideProgress();
             onError(String(e));
         });
@@ -850,6 +895,9 @@
         }
     };
 
+    /** Token của job "Compress full site" đang chạy, để nút Cancel huỷ đúng job. null khi không có job nào đang nén. */
+    var fullDeployCancelToken = null;
+
     /**
      * Full deploy giờ CHỈ nén site thành 1 file .zip local (không xoá,
      * không upload — người dùng tự làm 2 việc đó thủ công), nên không
@@ -860,6 +908,9 @@
 
         setStatus('Compressing...', false);
         config.btn.disabled = true;
+        fullDeployMarkBtn.style.display = 'none';
+        fullDeployMarkBtn.classList.remove('sc-ready');
+        fullDeployHint.style.display = 'none';
         post(config.startTask, []).then(function (data) {
             if (data.status !== 'success') {
                 setStatus('Error: ' + (data.message || 'unknown'), true);
@@ -872,17 +923,93 @@
                 return;
             }
 
+            var jobId = data.job_id;
+            fullDeployCancelToken = {
+                cancelled: false,
+                onCancelled: function () {
+                    hideProgress();
+                    finishCancelFullDeploy(jobId);
+                }
+            };
+
             showProgress(0, data.total, 'Compressing');
-            runBatchedJob(config.stepTask, data.job_id, 'Compressing', function (finalData) {
+            cancelCompressBtn.style.display = '';
+            cancelCompressBtn.disabled = false;
+
+            runBatchedJob(config.stepTask, jobId, 'Compressing', function (finalData) {
+                fullDeployCancelToken = null;
                 setStatus('Compressed ' + data.total + ' file(s) into "' + finalData.zip_file + '" — find it under user/data/ftp-sync/ and upload it to Hosting yourself.', false);
                 config.btn.disabled = !isLocal;
+                fullDeployMarkBtn.style.display = '';
+                fullDeployMarkBtn.disabled = !isLocal;
+                fullDeployMarkBtn.classList.add('sc-ready');
+                fullDeployHint.style.display = '';
             }, function (message) {
+                fullDeployCancelToken = null;
                 setStatus('Error: ' + message, true);
                 config.btn.disabled = !isLocal;
-            });
+            }, fullDeployCancelToken);
         }).catch(function (e) {
             setStatus('Error: ' + e, true);
             config.btn.disabled = !isLocal;
+        });
+    }
+
+    /** Yêu cầu huỷ job đang nén — chỉ đặt cờ, việc dọn dẹp thật diễn ra sau khi batch đang bay trả lời xong (xem runBatchedJob). */
+    function requestCancelFullDeploy() {
+        if (!fullDeployCancelToken || fullDeployCancelToken.cancelled) {
+            return;
+        }
+        if (!window.confirm('Huỷ nén? File .zip đang nén dở sẽ bị xoá.')) {
+            return;
+        }
+        fullDeployCancelToken.cancelled = true;
+        cancelCompressBtn.disabled = true;
+        setStatus('Cancelling...', false);
+    }
+
+    /** Dọn dẹp thật sự sau khi huỷ: gọi server xoá job + file .zip dở, rồi mở khoá lại nút Compress. */
+    function finishCancelFullDeploy(jobId) {
+        post('ftpsyncfulldeploycancel', [['job_id', jobId]]).then(function (data) {
+            fullDeployBtn.disabled = !isLocal;
+            if (data.status !== 'success') {
+                setStatus('Error while cancelling: ' + (data.message || 'unknown'), true);
+                return;
+            }
+            setStatus('Compression cancelled — the partial zip file was deleted.', false);
+        }).catch(function (e) {
+            fullDeployBtn.disabled = !isLocal;
+            setStatus('Error while cancelling: ' + e, true);
+        });
+    }
+
+    /**
+     * Gọi SAU KHI người dùng đã tự tay upload + giải nén zip full-deploy
+     * lên Hosting — kết nối FTP đọc mtime/size thật trên hosting rồi lưu
+     * lại làm baseline, để "Check differences" lần sau không báo
+     * push/pull/conflict giả do file bị đổi mtime lúc giải nén dù nội
+     * dung không đổi.
+     */
+    function runFullDeployMarkSynced() {
+        if (!window.confirm('Bạn đã tự tay upload VÀ giải nén file zip này lên Hosting chưa?\n\nThao tác này sẽ kết nối FTP để đọc mtime/size THẬT trên Hosting rồi lưu lại làm baseline (không upload/download gì) — chỉ bấm Yes khi chắc chắn đã deploy xong.')) {
+            return;
+        }
+
+        fullDeployMarkBtn.disabled = true;
+        setStatus('Reading current state from Hosting via FTP...', false);
+        post('ftpsyncfulldeploymarksynced', []).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                fullDeployMarkBtn.disabled = !isLocal;
+                return;
+            }
+            setStatus('Baseline updated for ' + data.files + ' file(s) across ' + data.groups + ' group(s) — "Check differences" will now treat Hosting as matching Local for these.', false);
+            fullDeployMarkBtn.style.display = 'none';
+            fullDeployMarkBtn.classList.remove('sc-ready');
+            fullDeployHint.style.display = 'none';
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+            fullDeployMarkBtn.disabled = !isLocal;
         });
     }
 
@@ -944,6 +1071,8 @@
 
     replaceBtn.addEventListener('click', function () { openConfirmModal('replace'); });
     fullDeployBtn.addEventListener('click', runFullDeploy);
+    fullDeployMarkBtn.addEventListener('click', runFullDeployMarkSynced);
+    cancelCompressBtn.addEventListener('click', requestCancelFullDeploy);
 
     confirmNoBtn.addEventListener('click', function () {
         confirmModal.style.display = 'none';

@@ -405,6 +405,92 @@ class SyncManager
     }
 
     /**
+     * Huỷ 1 job "Full deploy" đang nén dở (nút "Cancel compressing"): xoá
+     * file .zip tạm đang ghi (nếu có) và bỏ job state, để không để lại rác
+     * trong user/data/ftp-sync/. Không đụng gì tới FTP/hosting — full
+     * deploy chỉ nén cục bộ, chưa từng upload gì ở bước này.
+     */
+    public function cancelFullDeployJob(string $jobId): void
+    {
+        $job = $this->loadJson($this->dataDir . '/full-deploy-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such deploy job (it may have already finished or been cancelled).');
+        }
+
+        if (!empty($job['zip_path']) && is_file($job['zip_path'])) {
+            @unlink($job['zip_path']);
+        }
+
+        @unlink($this->dataDir . '/full-deploy-job.json');
+    }
+
+    /**
+     * Gọi sau khi người dùng đã TỰ TAY upload + giải nén file .zip của
+     * "Full deploy" lên hosting — đặt lại baseline cho các group vẫn được
+     * "Check differences" theo dõi (pages/config/accounts/theme đang
+     * active/plugins).
+     *
+     * QUAN TRỌNG: phải kết nối FTP và đọc mtime/size THẬT của remote sau
+     * khi giải nén — KHÔNG được tự gán remote = local, vì giải nén trên
+     * hosting hầu như luôn đặt mtime = giờ giải nén (khác giờ mtime local),
+     * dù nội dung file không đổi. Nếu baseline["remote"] chứa 1 giá trị bịa
+     * (không khớp mtime FTP trả về), lần "Check differences" kế tiếp vẫn
+     * sẽ thấy remote "đổi" so với baseline và báo pull giả y như cũ — đây
+     * chính là lỗi của bản trước.
+     *
+     * Baseline cũ của các group này bị THAY THẾ HOÀN TOÀN cho những path
+     * có mặt ở local (không giữ lại giá trị cũ); path chỉ tồn tại 1 bên
+     * (chưa deploy lên hosting, hoặc file lạ chỉ có trên hosting) CỐ Ý
+     * không được baseline ở đây — để lần check kế tiếp vẫn báo đúng thực
+     * trạng (push/pull) thay vì bị che giấu.
+     *
+     * @return array{groups:int, files:int}
+     */
+    public function markFullDeploySynced(): array
+    {
+        $groups = $this->resolveGroups();
+        if (empty($groups)) {
+            throw new \RuntimeException('No content selected to sync.');
+        }
+
+        $scanner = new FileScanner($this->ignorePatterns());
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+
+        $baseline = $this->loadBaseline();
+        foreach (array_keys($baseline) as $path) {
+            foreach (array_keys($groups) as $groupKey) {
+                if (str_starts_with($path, $groupKey . '/')) {
+                    unset($baseline[$path]);
+                    break;
+                }
+            }
+        }
+
+        $fileCount = 0;
+        try {
+            foreach ($groups as $groupKey => $group) {
+                $local = $scanner->scan($group['local']);
+                $remote = $ftp->scan($group['remote'], [$scanner, 'isIgnored']);
+
+                foreach ($local as $relPath => $localStat) {
+                    $baseline[$groupKey . '/' . $relPath] = [
+                        'local' => $localStat,
+                        'remote' => $remote[$relPath] ?? null,
+                    ];
+                    $fileCount++;
+                }
+            }
+        } finally {
+            $ftp->close();
+        }
+
+        $this->saveJson($this->dataDir . '/baseline.json', $baseline);
+
+        return ['groups' => count($groups), 'files' => $fileCount];
+    }
+
+    /**
      * Bước 1/2: xây hàng đợi thao tác từ kết quả diff đã lưu ở checkDiff()
      * + lựa chọn resolution của người dùng, lưu vào sync-job.json.
      * $resolutions: relPath (đã có tiền tố group) =>

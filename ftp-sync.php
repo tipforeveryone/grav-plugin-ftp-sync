@@ -121,6 +121,12 @@ class FTPSyncPlugin extends Plugin
         } elseif ($task === 'ftpsyncfulldeploystep') {
             $event->stopPropagation();
             $this->handleFullDeployStep($controller->post ?? []);
+        } elseif ($task === 'ftpsyncfulldeploymarksynced') {
+            $event->stopPropagation();
+            $this->handleFullDeployMarkSynced();
+        } elseif ($task === 'ftpsyncfulldeploycancel') {
+            $event->stopPropagation();
+            $this->handleFullDeployCancel($controller->post ?? []);
         } elseif ($task === 'ftpsynclistbackups') {
             $event->stopPropagation();
             $this->handleListBackups();
@@ -258,6 +264,43 @@ class FTPSyncPlugin extends Plugin
 
         try {
             $result = $this->syncManager()->stepFullDeployJob($jobId);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Nút "Cancel compressing": huỷ job full-deploy đang nén dở và xoá file .zip tạm. */
+    private function handleFullDeployCancel(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $jobId = (string) ($post['job_id'] ?? '');
+
+        try {
+            $this->syncManager()->cancelFullDeployJob($jobId);
+            $this->grav['admin']->json_response = ['status' => 'success'];
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /**
+     * Gọi sau khi người dùng đã tự tay upload + giải nén zip "Full deploy"
+     * lên hosting — đọc mtime/size thật trên hosting qua FTP (không
+     * upload/download gì) và lưu lại làm baseline cho phần "Check
+     * differences" theo dõi.
+     */
+    private function handleFullDeployMarkSynced(): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        try {
+            $result = $this->syncManager()->markFullDeploySynced();
             $this->grav['admin']->json_response = ['status' => 'success'] + $result;
         } catch (\Throwable $e) {
             $this->jsonError($e->getMessage());
