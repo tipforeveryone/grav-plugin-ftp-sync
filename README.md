@@ -60,7 +60,8 @@ Go to `Admin > Plugins > FTP Sync` and fill in:
 ## Security
 
 - The FTP password is stored in plaintext in the config (`user/config/plugins/ftp-sync.yaml`) — this file is **always excluded** from every sync/deploy to avoid accidentally uploading it to hosting.
-- Other sensitive files (`security.yaml`, `security-private.php`, `versions.yaml`) are excluded by default too.
+- Other sensitive files under `user/config` (`security.yaml`, `security-private.php`, `versions.yaml`) are excluded by default too.
+- These are matched by full path (e.g. `user/config/security.yaml`), not by bare filename — a bare `security.yaml` pattern would also match `system/config/security.yaml`, a real Grav core file, and silently drop it from every "Full deploy", breaking the site once it's missing on hosting.
 - Every write action (upload/delete) is fully locked unless the plugin detects it's running in a local environment (`.ddev/`) — unless `force_allow_remote` is explicitly enabled.
 
 ## Author

@@ -58,7 +58,11 @@ class FileScanner
         }
     }
 
-    /** Khớp theo từng segment của relPath với các mẫu (hỗ trợ '*' qua fnmatch). */
+    /**
+     * Mẫu chứa '/' được khớp với TOÀN BỘ relPath (VD "user/config/security.yaml"
+     * chỉ loại đúng file đó, không đụng tới "system/config/security.yaml").
+     * Mẫu không có '/' vẫn khớp theo từng segment như cũ (hỗ trợ '*' qua fnmatch).
+     */
     public function isIgnored(string $relPath): bool
     {
         $segments = explode('/', $relPath);
@@ -67,6 +71,14 @@ class FileScanner
             if ($pattern === '') {
                 continue;
             }
+
+            if (str_contains($pattern, '/')) {
+                if (fnmatch($pattern, $relPath)) {
+                    return true;
+                }
+                continue;
+            }
+
             foreach ($segments as $segment) {
                 if (fnmatch($pattern, $segment)) {
                     return true;

@@ -66,8 +66,8 @@ form:
     ignore_patterns:
       type: text
       label: File/folder patterns to skip when syncing
-      help: 'Comma-separated, supports the * wildcard (e.g. .git,.ddev,node_modules,*.zip). Matched against EVERY path segment, at any depth — avoid generic words like "cache" here, many composer packages under vendor/ legitimately have a folder named exactly that (vendor/doctrine/cache, vendor/psr/cache, ...) and it would silently exclude them from Full deploy, breaking the site. Sensitive files under user/config (security.yaml, security-private.php, versions.yaml) and this plugin''s own config file (ftp-sync.yaml) are blocked by default to avoid leaking/overwriting the FTP password.'
-      default: '.git,cache,.ddev,node_modules,*.zip,.DS_Store,Thumbs.db,security.yaml,security-private.php,versions.yaml,ftp-sync.yaml'
+      help: 'Comma-separated, supports the * wildcard. A pattern with NO slash (e.g. .git, *.zip) is matched against every path segment, at any depth — avoid generic words like "cache" here, many composer packages under vendor/ legitimately have a folder named exactly that (vendor/doctrine/cache, vendor/psr/cache, ...) and it would silently exclude them from Full deploy, breaking the site. A pattern WITH a slash (e.g. user/config/security.yaml) is matched against the full relative path instead, so it only excludes that exact file — use this form for sensitive files that share a basename with unrelated core files (system/config/security.yaml is a real Grav core file and must NOT be excluded). Sensitive files under user/config (security.yaml, security-private.php, versions.yaml) and this plugin''s own config file (ftp-sync.yaml) are blocked by default this way, to avoid leaking/overwriting the FTP password.'
+      default: '.git,cache,.ddev,node_modules,*.zip,.DS_Store,Thumbs.db,user/config/security.yaml,user/config/security-private.php,user/config/versions.yaml,user/config/plugins/ftp-sync.yaml'
       validate:
         type: commalist
 
