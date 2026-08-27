@@ -443,7 +443,7 @@
                 <span class="sc-filter-label">Status:</span>
                 <select id="sc-filter-status">
                     <option value="">All</option>
-                    <option value="conflict">Conflict</option>
+                    <option value="changed">Changed (size/mtime differ)</option>
                     <option value="local_only">Local only</option>
                     <option value="host_only">Hosting only</option>
                 </select>
@@ -546,24 +546,29 @@
     }
 
     var TYPE_LABELS = {
-        push: 'Push to Hosting',
-        pull: 'Pull to Local',
-        conflict: 'Conflict — changed on both sides',
-        deleted_local: 'Deleted on Local',
-        deleted_remote: 'Deleted on Hosting'
+        missing_remote: 'Missing on Hosting',
+        missing_local: 'Missing on Local',
+        changed: 'Different — size or mtime differ'
     };
 
-    // Default select value per type: push/pull default to their natural
-    // direction (keeps the old automatic behavior if the user leaves it
-    // alone); conflict/deleted_* require an explicit choice (default ''
-    // = no action).
-    var DEFAULT_RESOLUTION = {
-        push: 'local',
-        pull: 'remote',
-        conflict: '',
-        deleted_local: '',
-        deleted_remote: ''
+    // Default select value per type: missing_remote/missing_local default to
+    // their natural direction (keeps the old automatic behavior if the user
+    // leaves it alone); 'changed' defaults to the side with the newer mtime
+    // when it's known, otherwise requires an explicit choice.
+    var DEFAULT_RESOLUTION_BY_TYPE = {
+        missing_remote: 'local',
+        missing_local: 'remote',
+        changed: ''
     };
+
+    function defaultResolution(row) {
+        if (row.type === 'changed') {
+            if (row.newer === 'local') { return 'local'; }
+            if (row.newer === 'remote') { return 'remote'; }
+            return '';
+        }
+        return DEFAULT_RESOLUTION_BY_TYPE[row.type] || '';
+    }
 
     var RESOLUTION_OPTIONS = [
         ['', 'No action'],
@@ -603,43 +608,44 @@
         return '';
     }
 
-    /** Collapses the 5 internal types into the 3 groups shown in the "Status" filter. */
+    /** Collapses the internal types into the groups shown in the "Status" filter. */
     function statusGroup(type) {
-        if (type === 'conflict') { return 'conflict'; }
-        if (type === 'push' || type === 'deleted_remote') { return 'local_only'; }
-        if (type === 'pull' || type === 'deleted_local') { return 'host_only'; }
+        if (type === 'changed') { return 'changed'; }
+        if (type === 'missing_remote') { return 'local_only'; }
+        if (type === 'missing_local') { return 'host_only'; }
         return '';
     }
 
     /**
-     * Local/Host columns. Conflict: the side with the newer mtime shows
-     * "Newer" (light blue), the older side shows "Conflict" (red).
-     * Push/pull/deleted_*: "X" on whichever side currently has the file.
+     * Local/Host columns. 'changed': the side with the newer mtime shows
+     * "Newer" (light blue), the older side shows "Older"; if neither side
+     * is newer (mtime tie, only size differs) both show "Diff" (red).
+     * missing_remote/missing_local: "X" on whichever side currently HAS
+     * the file (i.e. missing_remote = local has it, hosting doesn't -> X
+     * on Local column).
      */
     function statusCells(row) {
         var empty = { text: '', cls: '' };
-        var conflictCell = { text: 'Conflict', cls: 'sc-status-conflict' };
+        var diffCell = { text: 'Diff', cls: 'sc-status-conflict' };
         var newerCell = { text: 'Newer', cls: 'sc-status-newer' };
         var olderCell = { text: 'Older', cls: 'sc-status-older' };
         var xCell = { text: 'X', cls: 'sc-status-x' };
 
         switch (row.type) {
-            case 'conflict':
+            case 'changed':
                 if (row.newer === 'local') { return [newerCell, olderCell]; }
                 if (row.newer === 'remote') { return [olderCell, newerCell]; }
-                return [conflictCell, conflictCell];
-            case 'push':
-            case 'deleted_remote':
+                return [diffCell, diffCell];
+            case 'missing_remote':
                 return [xCell, empty];
-            case 'pull':
-            case 'deleted_local':
+            case 'missing_local':
                 return [empty, xCell];
             default:
                 return [empty, empty];
         }
     }
 
-    function buildResolutionSelect(path, type) {
+    function buildResolutionSelect(path, row) {
         var select = document.createElement('select');
         select.dataset.path = path;
         select.className = 'sc-resolution';
@@ -649,7 +655,7 @@
             o.textContent = opt[1];
             select.appendChild(o);
         });
-        select.value = DEFAULT_RESOLUTION[type] ?? '';
+        select.value = defaultResolution(row);
         return select;
     }
 
@@ -700,7 +706,7 @@
 
             var tdAction = document.createElement('td');
             tdAction.className = 'sc-col-action';
-            tdAction.appendChild(buildResolutionSelect(path, type));
+            tdAction.appendChild(buildResolutionSelect(path, lastRows[path]));
             tr.appendChild(tdAction);
 
             tbody.appendChild(tr);

@@ -3,73 +3,59 @@
 namespace Grav\Plugin\FtpSync;
 
 /**
- * So sánh map local / remote hiện tại với baseline (giá trị mtime+size của
- * MỖI BÊN tại lần sync thành công gần nhất — không phải 1 giá trị chung,
- * vì sau khi push, mtime của file trên remote do server tự đặt lúc upload,
- * không thể ép bằng mtime local qua FTP thường).
+ * So sánh trực tiếp map local / remote hiện tại (không qua baseline nữa).
  *
- * Không dùng hash (xem plan) — chỉ mtime+size, nên lần chạy đầu (chưa có
- * baseline) mọi path tồn tại ở cả 2 bên mà khác nhau đều coi là 'conflict'
- * để bắt người dùng xác nhận tay 1 lần; từ lần 2 mới suy luận được hướng
- * thay đổi dựa trên baseline.
+ * - Path chỉ tồn tại ở 1 bên -> 'missing_remote' (chưa có trên hosting)
+ *   hoặc 'missing_local' (chưa có ở local).
+ * - Path tồn tại ở cả 2 bên -> so `size` trước (ưu tiên); nếu size bằng
+ *   nhau mới xét tới `mtime`. Khác 1 trong 2 -> 'changed', kèm 'newer' =
+ *   bên có mtime lớn hơn (để UI tô xanh bên mới hơn). Nếu mtime bằng nhau
+ *   (không suy luận được bên nào mới hơn) -> 'newer' = null.
  */
 class DiffEngine
 {
     /**
      * @param array<string,array{mtime:int,size:int}> $local
      * @param array<string,array{mtime:int,size:int}> $remote
-     * @param array<string,array{local:?array,remote:?array}> $baseline
-     * @return array<string, array{type:string}> relPath => ['type' => push|pull|conflict|deleted_local|deleted_remote]
+     * @return array<string, array{type:string, newer?:?string}> relPath => ['type' => missing_remote|missing_local|changed, 'newer'? => local|remote|null]
      */
-    public function diff(array $local, array $remote, array $baseline): array
+    public function diff(array $local, array $remote): array
     {
         $result = [];
-        $paths = array_unique(array_merge(array_keys($local), array_keys($remote), array_keys($baseline)));
+        $paths = array_unique(array_merge(array_keys($local), array_keys($remote)));
 
         foreach ($paths as $path) {
             $cl = $local[$path] ?? null;
             $cr = $remote[$path] ?? null;
-            $bl = $baseline[$path]['local'] ?? null;
-            $br = $baseline[$path]['remote'] ?? null;
 
-            $localDeleted = $bl !== null && $cl === null;
-            $remoteDeleted = $br !== null && $cr === null;
-
-            if ($localDeleted && $remoteDeleted) {
-                continue; // đã xoá cả 2 bên từ trước, baseline biết rồi -> không có gì để báo
-            }
-            if ($localDeleted) {
-                $result[$path] = ['type' => 'deleted_local'];
+            if ($cl === null) {
+                $result[$path] = ['type' => 'missing_local'];
                 continue;
             }
-            if ($remoteDeleted) {
-                $result[$path] = ['type' => 'deleted_remote'];
+            if ($cr === null) {
+                $result[$path] = ['type' => 'missing_remote'];
                 continue;
             }
 
-            $localChanged = !$this->same($cl, $bl);
-            $remoteChanged = !$this->same($cr, $br);
+            if ($cl['size'] === $cr['size'] && $cl['mtime'] === $cr['mtime']) {
+                continue; // không khác gì -> không cần báo
+            }
 
-            if (!$localChanged && !$remoteChanged) {
-                continue;
-            }
-            if ($localChanged && $remoteChanged) {
-                $result[$path] = ['type' => 'conflict'];
-            } elseif ($localChanged) {
-                $result[$path] = ['type' => 'push'];
-            } else {
-                $result[$path] = ['type' => 'pull'];
-            }
+            $result[$path] = ['type' => 'changed', 'newer' => $this->newerSide($cl, $cr)];
         }
 
         return $result;
     }
 
-    private function same(?array $a, ?array $b): bool
+    /** @param array{mtime:int,size:int} $local @param array{mtime:int,size:int} $remote */
+    private function newerSide(array $local, array $remote): ?string
     {
-        if ($a === null || $b === null) {
-            return $a === $b;
+        if ($local['mtime'] > $remote['mtime']) {
+            return 'local';
         }
-        return $a['size'] === $b['size'] && $a['mtime'] === $b['mtime'];
+        if ($remote['mtime'] > $local['mtime']) {
+            return 'remote';
+        }
+        return null;
     }
 }

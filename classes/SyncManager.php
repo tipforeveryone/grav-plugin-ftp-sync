@@ -141,25 +141,7 @@ class SyncManager
         }
 
         $baseline = $this->loadBaseline();
-        $rows = (new DiffEngine())->diff($local, $remote, $baseline);
-
-        // Với row 'conflict', đánh dấu bên nào có mtime mới hơn để UI tô màu
-        // riêng (bên mới hơn = nổi bật, bên cũ hơn = "Xung đột").
-        foreach ($rows as $path => &$row) {
-            if ($row['type'] !== 'conflict') {
-                continue;
-            }
-            $localMtime = $local[$path]['mtime'] ?? 0;
-            $remoteMtime = $remote[$path]['mtime'] ?? 0;
-            if ($localMtime > $remoteMtime) {
-                $row['newer'] = 'local';
-            } elseif ($remoteMtime > $localMtime) {
-                $row['newer'] = 'remote';
-            } else {
-                $row['newer'] = null;
-            }
-        }
-        unset($row);
+        $rows = (new DiffEngine())->diff($local, $remote);
 
         $state = [
             'groups' => $groups,
