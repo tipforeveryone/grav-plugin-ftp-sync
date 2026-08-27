@@ -7,10 +7,12 @@ namespace Grav\Plugin\FtpSync;
  *
  * - Path chỉ tồn tại ở 1 bên -> 'missing_remote' (chưa có trên hosting)
  *   hoặc 'missing_local' (chưa có ở local).
- * - Path tồn tại ở cả 2 bên -> so `size` trước (ưu tiên); nếu size bằng
- *   nhau mới xét tới `mtime`. Khác 1 trong 2 -> 'changed', kèm 'newer' =
- *   bên có mtime lớn hơn (để UI tô xanh bên mới hơn). Nếu mtime bằng nhau
- *   (không suy luận được bên nào mới hơn) -> 'newer' = null.
+ * - Path tồn tại ở cả 2 bên -> CHỈ xét `size`: bằng nhau thì bỏ qua hoàn
+ *   toàn (không xét mtime nữa, kể cả khi mtime khác nhau). Khác nhau mới
+ *   coi là 'changed', khi đó mtime chỉ dùng để suy ra bên nào mới hơn
+ *   ('newer', để UI tô xanh) chứ không quyết định có đổi hay không. Nếu
+ *   mtime cũng bằng nhau (hiếm — size khác nhưng mtime trùng) -> 'newer'
+ *   = null.
  */
 class DiffEngine
 {
@@ -37,8 +39,8 @@ class DiffEngine
                 continue;
             }
 
-            if ($cl['size'] === $cr['size'] && $cl['mtime'] === $cr['mtime']) {
-                continue; // không khác gì -> không cần báo
+            if ($cl['size'] === $cr['size']) {
+                continue; // size giống nhau -> coi như không đổi, không xét mtime
             }
 
             $result[$path] = ['type' => 'changed', 'newer' => $this->newerSide($cl, $cr)];

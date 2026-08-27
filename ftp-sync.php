@@ -74,9 +74,15 @@ class FTPSyncPlugin extends Plugin
         });
     }
 
+    /**
+     * Hides the "FTP Sync" nav item entirely on a live hosting deployment
+     * (not local, force_allow_remote not set) — the page still exists and
+     * is reachable by direct URL for anyone who knows it, but the sidebar
+     * never advertises a feature that guardRequest() will refuse anyway.
+     */
     public function onAdminMenu(): void
     {
-        if (!$this->canManage()) {
+        if (!$this->canManage() || !$this->isEnabled()) {
             return;
         }
 

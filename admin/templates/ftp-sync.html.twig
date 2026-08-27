@@ -311,7 +311,12 @@
         }
     </style>
 
-    {% if ftp_sync_is_enabled() %}
+    {% set sync_enabled = ftp_sync_is_enabled() %}
+    {% if not sync_enabled %}
+    <div class="notices error">
+        <p><i class="fa fa-exclamation-triangle"></i> <b>Plugin not work on live site, only local host.</b></p>
+    </div>
+    {% endif %}
     <div class="sc-top">
         <div class="sc-top-left">
             <div class="notices">
@@ -323,27 +328,27 @@
                 <div class="sc-kinds">
                     <div class="sc-kinds-title">Sync</div>
                     <label class="sc-kind-row">
-                        <input type="checkbox" class="sc-kind" value="pages" checked>
+                        <input type="checkbox" class="sc-kind" value="pages" checked {{ sync_enabled ? '' : 'disabled' }}>
                         <span class="sc-kind-name">Pages</span>
                         <span class="sc-kind-desc">user/pages (all page content)</span>
                     </label>
                     <label class="sc-kind-row">
-                        <input type="checkbox" class="sc-kind" value="themes" checked>
+                        <input type="checkbox" class="sc-kind" value="themes" checked {{ sync_enabled ? '' : 'disabled' }}>
                         <span class="sc-kind-name">Themes</span>
                         <span class="sc-kind-desc">The site's active theme (auto-detected, not configured manually)</span>
                     </label>
                     <label class="sc-kind-row">
-                        <input type="checkbox" class="sc-kind" value="plugins" checked>
+                        <input type="checkbox" class="sc-kind" value="plugins" checked {{ sync_enabled ? '' : 'disabled' }}>
                         <span class="sc-kind-name">Plugins</span>
                         <span class="sc-kind-desc">Plugins listed in the config, or every plugin under user/plugins/ if that list is left empty</span>
                     </label>
                     <label class="sc-kind-row">
-                        <input type="checkbox" class="sc-kind" value="config" checked>
+                        <input type="checkbox" class="sc-kind" value="config" checked {{ sync_enabled ? '' : 'disabled' }}>
                         <span class="sc-kind-name">Config</span>
                         <span class="sc-kind-desc">user/config (excluding sensitive files such as the FTP password)</span>
                     </label>
                     <label class="sc-kind-row">
-                        <input type="checkbox" class="sc-kind" value="accounts" checked>
+                        <input type="checkbox" class="sc-kind" value="accounts" checked {{ sync_enabled ? '' : 'disabled' }}>
                         <span class="sc-kind-name">Accounts</span>
                         <span class="sc-kind-desc">user/accounts (Admin login accounts)</span>
                     </label>
@@ -353,23 +358,23 @@
 
         <div class="sc-top-right">
             <div class="sc-toolbar">
-                <button type="button" class="button" id="sc-check-diff"><i class="fa fa-refresh"></i> Check differences</button>
+                <button type="button" class="button" id="sc-check-diff" {{ sync_enabled ? '' : 'disabled' }}><i class="fa fa-refresh"></i> Check differences</button>
                 <button type="button" class="button primary" id="sc-sync-now" disabled>
                     <i class="fa fa-cloud-upload"></i> Sync now
                 </button>
-                <button type="button" class="button" id="sc-replace-sync"
+                <button type="button" class="button" id="sc-replace-sync" {{ sync_enabled ? '' : 'disabled' }}
                         title="Delete all files currently on Hosting (within the checked categories above), then upload everything from Local.">
                     <i class="fa fa-warning"></i> Replace local sync to hosting
                 </button>
-                <button type="button" class="button" id="sc-full-deploy"
+                <button type="button" class="button" id="sc-full-deploy" {{ sync_enabled ? '' : 'disabled' }}
                         title="Ignores the categories above — bundles the ENTIRE site (minus dev-only files) into one .zip in user/data/ftp-sync/. Deleting old files on hosting and uploading the zip are up to you.">
                     <i class="fa fa-rocket"></i> Compress full site
                 </button>
-                <button type="button" class="button" id="sc-full-deploy-mark-synced" style="display:none"
+                <button type="button" class="button" id="sc-full-deploy-mark-synced" style="display:none" {{ sync_enabled ? '' : 'disabled' }}
                         title="Click ONLY after you have manually uploaded and extracted this zip on Hosting. Resets the sync baseline so 'Check differences' won't flag files whose content is unchanged but got a new mtime from extraction.">
                     <i class="fa fa-check"></i> Mark as deployed
                 </button>
-                <button type="button" class="button" id="sc-show-backups">
+                <button type="button" class="button" id="sc-show-backups" {{ sync_enabled ? '' : 'disabled' }}>
                     <i class="fa fa-archive"></i> Show backups
                 </button>
             </div>
@@ -478,15 +483,6 @@
             <tbody></tbody>
         </table>
     </div>
-    {% else %}
-    <div class="notices error">
-        <p><i class="fa fa-exclamation-triangle"></i> <b>FTP Sync is disabled.</b>
-        This does not look like a local development environment (no <code>.ddev/</code> folder found at the webroot),
-        so every FTP Sync action — checking differences, syncing, uploading, and managing backups — is turned off here.
-        This is intentional: FTP credentials should never be exercised from a live hosting deployment of this plugin.</p>
-        <p>If this really is a local environment and the check is wrong, enable <code>force_allow_remote</code> in the plugin's config.</p>
-    </div>
-    {% endif %}
 </div>
 
 {% if ftp_sync_is_enabled() %}
