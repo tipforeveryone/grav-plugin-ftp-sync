@@ -76,6 +76,9 @@ class FTPSyncPlugin extends Plugin
 
         var notice = document.createElement('div');
         notice.className = 'notices error';
+        notice.style.margin = '1.5rem 2rem';
+        notice.style.textAlign = 'center';
+        notice.style.fontSize = '1.2rem';
         notice.innerHTML = '<p><i class="fa fa-exclamation-triangle"></i> <b>Plugin not work on live site, only local host.</b></p>';
         form.parentNode.insertBefore(notice, form);
 

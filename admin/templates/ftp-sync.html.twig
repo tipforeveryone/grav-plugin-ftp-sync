@@ -13,6 +13,11 @@
     <style>
         #ftp-sync-app { overflow: hidden; padding: 0 2rem 3rem 2rem; }
         #ftp-sync-app .notices { padding-left: 0; }
+        #ftp-sync-app .sc-live-notice {
+            margin: 1.5rem 2rem;
+            text-align: center;
+            font-size: 1.2rem;
+        }
 
         #ftp-sync-app .sc-top {
             display: flex;
@@ -313,7 +318,7 @@
 
     {% set sync_enabled = ftp_sync_is_enabled() %}
     {% if not sync_enabled %}
-    <div class="notices error">
+    <div class="notices error sc-live-notice">
         <p><i class="fa fa-exclamation-triangle"></i> <b>Plugin not work on live site, only local host.</b></p>
     </div>
     {% endif %}
