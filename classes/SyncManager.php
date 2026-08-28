@@ -127,21 +127,32 @@ class SyncManager
 
         $local = [];
         $remote = [];
+        $files = [];
+        $rows = [];
         try {
             foreach ($groups as $groupKey => $group) {
                 foreach ($scanner->scan($group['local']) as $relPath => $stat) {
-                    $local[$groupKey . '/' . $relPath] = $stat;
+                    $path = $groupKey . '/' . $relPath;
+                    $local[$path] = $stat;
+                    $files[$path]['local'] = rtrim($group['local'], '/') . '/' . $relPath;
+                    $files[$path]['remote'] = rtrim($group['remote'], '/') . '/' . $relPath;
                 }
                 foreach ($ftp->scan($group['remote'], [$scanner, 'isIgnored']) as $relPath => $stat) {
-                    $remote[$groupKey . '/' . $relPath] = $stat;
+                    $path = $groupKey . '/' . $relPath;
+                    $remote[$path] = $stat;
+                    $files[$path]['local'] = $files[$path]['local'] ?? (rtrim($group['local'], '/') . '/' . $relPath);
+                    $files[$path]['remote'] = $files[$path]['remote'] ?? (rtrim($group['remote'], '/') . '/' . $relPath);
                 }
             }
+
+            $rows = (new DiffEngine())->diff($local, $remote, function (string $path) use ($files, $ftp): bool {
+                return $this->sameSizeContentDiffers($files[$path]['local'], $files[$path]['remote'], $ftp);
+            });
         } finally {
             $ftp->close();
         }
 
         $baseline = $this->loadBaseline();
-        $rows = (new DiffEngine())->diff($local, $remote);
 
         $state = [
             'groups' => $groups,
@@ -819,6 +830,39 @@ class SyncManager
             return null;
         }
         return ['mtime' => filemtime($path) ?: 0, 'size' => filesize($path) ?: 0];
+    }
+
+    /**
+     * Chỉ được DiffEngine gọi khi local/remote đã cùng size — size bằng
+     * nhau không đảm bảo nội dung giống nhau (vd đổi "admin.super" ->
+     * "admin.pages", cùng 11 ký tự, tổng size file không đổi). Tải file
+     * remote về tạm rồi so hash CRC32 với file local — chỉ tốn 1 lượt
+     * download cho đúng những cặp "nghi ngờ" này (size trùng), không phải
+     * toàn bộ cây file, để "Check differences" không biến thành tải hết
+     * site về qua FTP.
+     */
+    private function sameSizeContentDiffers(string $localPath, string $remotePath, FtpClient $ftp): bool
+    {
+        if (!is_file($localPath)) {
+            return false;
+        }
+
+        $localHash = hash_file('crc32b', $localPath);
+
+        $tmp = tempnam(sys_get_temp_dir(), 'ftp-sync-hash-');
+        try {
+            $ftp->download($remotePath, $tmp);
+            $remoteHash = hash_file('crc32b', $tmp);
+        } catch (\Throwable $e) {
+            // Không tải được (mất kết nối tạm thời, quyền đọc...) — thà báo
+            // thừa 1 file "changed" (người dùng tự xem lại) còn hơn âm thầm
+            // bỏ sót 1 thay đổi thật.
+            return true;
+        } finally {
+            @unlink($tmp);
+        }
+
+        return $localHash !== $remoteHash;
     }
 
     private function statRemote(FtpClient $ftp, string $remotePath): ?array
