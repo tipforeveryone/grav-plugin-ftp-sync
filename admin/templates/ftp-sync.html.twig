@@ -777,17 +777,28 @@
         }
 
         setStatus('Checking...', false);
+        checkBtn.disabled = true;
         syncBtn.disabled = true;
         var fields = kinds.map(function (kind) { return ['kinds[]', kind]; });
-        post('ftpsynccheckdiff', fields).then(function (data) {
+        post('ftpsynccheckdiffstart', fields).then(function (data) {
             if (data.status !== 'success') {
                 setStatus('Error: ' + (data.message || 'unknown'), true);
+                checkBtn.disabled = false;
                 return;
             }
-            renderRows(data.rows || {});
-            syncBtn.disabled = !isLocal || Object.keys(data.rows || {}).length === 0;
+
+            showProgress(0, data.total, data.label || 'Checking');
+            runBatchedJob('ftpsynccheckdiffstep', data.job_id, 'Checking', function (finalData) {
+                checkBtn.disabled = false;
+                renderRows(finalData.rows || {});
+                syncBtn.disabled = !isLocal || Object.keys(finalData.rows || {}).length === 0;
+            }, function (message) {
+                setStatus('Error: ' + message, true);
+                checkBtn.disabled = false;
+            });
         }).catch(function (e) {
             setStatus('Error: ' + e, true);
+            checkBtn.disabled = false;
         });
     });
 
@@ -795,7 +806,10 @@
      * Chạy tuần tự nhiều batch nhỏ (mỗi lần gọi 1 request AJAX) cho tới khi
      * finished=true, cập nhật progress bar sau mỗi batch. `stepTask` nhận
      * job_id, trả về {done,total,finished,...}; `onDone` nhận response của
-     * batch cuối cùng (finished=true).
+     * batch cuối cùng (finished=true). Job nào có nhiều pha khác nhau (VD
+     * "Check differences": Scanning rồi tới Comparing) có thể trả kèm field
+     * `label` trong mỗi response batch — field đó LUÔN được ưu tiên hơn
+     * `label` cố định truyền vào, để progress bar đổi nhãn đúng theo pha.
      *
      * `cancelToken` (tuỳ chọn, dạng {cancelled:false, onCancelled:fn}) cho
      * phép huỷ giữa chừng: cờ `cancelled` chỉ được đọc SAU KHI request batch
@@ -813,7 +827,7 @@
                 onError(data.message || 'unknown');
                 return;
             }
-            showProgress(data.done, data.total, label);
+            showProgress(data.done, data.total, data.label || label);
             if (data.finished) {
                 hideProgress();
                 onDone(data);

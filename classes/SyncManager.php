@@ -105,74 +105,194 @@ class SyncManager
     }
 
     /**
-     * Quét local + remote, diff với baseline, lưu kết quả vào last-diff.json
-     * để taskSyncNow dùng lại (không cần quét lại từ đầu).
+     * Bước 1/3 của "Check differences": chỉ quét LOCAL (nhanh, đọc
+     * filesystem tại chỗ) cho mọi group, lưu vào check-job.json. KHÔNG quét
+     * remote ở đây — quét FTP đệ quy từng thư mục là phần THẬT SỰ chậm
+     * (round-trip mạng cho mỗi thư mục con), nên phải tách ra thành từng
+     * bước ở stepCheckDiffJob() (1 group/lần gọi) để UI vẽ được progress
+     * bar theo tiến trình thật ngay từ pha quét, thay vì đứng hình "Checking..."
+     * cho tới khi TOÀN BỘ group quét xong mới có phản hồi đầu tiên.
      *
      * @param string[] $kinds Lọc theo nhóm muốn đồng bộ: 'pages'|'themes'|'plugins'|'config'|'accounts'.
      *                        Rỗng = tất cả.
-     * @return array{groups: array<string,string>, rows: array<string, array{type:string}>, cold_start: bool}
+     * @return array{job_id:string, total:int, label:string}
      */
-    public function checkDiff(array $kinds = []): array
+    public function startCheckDiffJob(array $kinds = []): array
     {
         $groups = $this->resolveGroups($kinds);
         if (empty($groups)) {
             throw new \RuntimeException('No content selected to sync.');
         }
 
-        $ignorePatterns = $this->ignorePatterns();
-        $scanner = new FileScanner($ignorePatterns);
-
-        $ftp = new FtpClient();
-        $this->connectFtp($ftp);
+        $scanner = new FileScanner($this->ignorePatterns());
 
         $local = [];
-        $remote = [];
         $files = [];
-        $rows = [];
-        try {
-            foreach ($groups as $groupKey => $group) {
-                foreach ($scanner->scan($group['local']) as $relPath => $stat) {
-                    $path = $groupKey . '/' . $relPath;
-                    $local[$path] = $stat;
-                    $files[$path]['local'] = rtrim($group['local'], '/') . '/' . $relPath;
-                    $files[$path]['remote'] = rtrim($group['remote'], '/') . '/' . $relPath;
-                }
-                foreach ($ftp->scan($group['remote'], [$scanner, 'isIgnored']) as $relPath => $stat) {
-                    $path = $groupKey . '/' . $relPath;
-                    $remote[$path] = $stat;
-                    $files[$path]['local'] = $files[$path]['local'] ?? (rtrim($group['local'], '/') . '/' . $relPath);
-                    $files[$path]['remote'] = $files[$path]['remote'] ?? (rtrim($group['remote'], '/') . '/' . $relPath);
-                }
+        foreach ($groups as $groupKey => $group) {
+            foreach ($scanner->scan($group['local']) as $relPath => $stat) {
+                $path = $groupKey . '/' . $relPath;
+                $local[$path] = $stat;
+                $files[$path] = [
+                    'local' => rtrim($group['local'], '/') . '/' . $relPath,
+                    'remote' => rtrim($group['remote'], '/') . '/' . $relPath,
+                ];
             }
+        }
 
-            $rows = (new DiffEngine())->diff($local, $remote, function (string $path) use ($files, $ftp): bool {
-                return $this->sameSizeContentDiffers($files[$path]['local'], $files[$path]['remote'], $ftp);
-            });
+        $jobId = bin2hex(random_bytes(8));
+        $job = [
+            'id' => $jobId,
+            'phase' => 'scan',
+            'groups' => $groups,
+            'scan_queue' => array_keys($groups),
+            'scan_total' => count($groups),
+            'scan_done' => 0,
+            'local' => $local,
+            'remote' => [],
+            'files' => $files,
+            'paths' => [],
+            'compare_total' => 0,
+            'compare_done' => 0,
+            'rows' => [],
+            'baseline' => $this->loadBaseline(),
+        ];
+        $this->saveJson($this->dataDir . '/check-job.json', $job);
+
+        return ['job_id' => $jobId, 'total' => $job['scan_total'], 'label' => 'Scanning'];
+    }
+
+    /**
+     * Bước 2-3/3: 1 lần gọi xử lý ĐÚNG 1 đơn vị việc — hoặc quét remote 1
+     * group (pha 'scan'), hoặc so sánh 1 batch path (pha 'compare', sau khi
+     * pha scan xong). Gọi lặp lại tới khi finished=true. Trả kèm 'label' để
+     * UI đổi nhãn progress bar đúng theo pha đang chạy (Scanning -> Comparing).
+     *
+     * @return array{done:int,total:int,finished:bool,label:string,groups?:array<string,string>,rows?:array<string,array{type:string}>,cold_start?:bool}
+     */
+    public function stepCheckDiffJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
+    {
+        $job = $this->loadJson($this->dataDir . '/check-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such check job (it may have finished, been cancelled, or expired).');
+        }
+
+        if ($job['phase'] === 'scan') {
+            return $this->stepCheckDiffScan($job);
+        }
+
+        return $this->stepCheckDiffCompare($job, $batchSize);
+    }
+
+    /** Quét remote của ĐÚNG 1 group còn lại trong scan_queue, gộp kết quả vào job['remote']/job['files']. */
+    private function stepCheckDiffScan(array $job): array
+    {
+        $groupKey = array_shift($job['scan_queue']);
+        $group = $job['groups'][$groupKey];
+
+        $scanner = new FileScanner($this->ignorePatterns());
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+        try {
+            foreach ($ftp->scan($group['remote'], [$scanner, 'isIgnored']) as $relPath => $stat) {
+                $path = $groupKey . '/' . $relPath;
+                $job['remote'][$path] = $stat;
+                $job['files'][$path] = $job['files'][$path] ?? [
+                    'local' => rtrim($group['local'], '/') . '/' . $relPath,
+                    'remote' => rtrim($group['remote'], '/') . '/' . $relPath,
+                ];
+            }
         } finally {
             $ftp->close();
         }
 
-        $baseline = $this->loadBaseline();
+        $job['scan_done']++;
 
-        $state = [
-            'groups' => $groups,
-            'local' => $local,
-            'remote' => $remote,
-            'baseline' => $baseline,
-            'rows' => $rows,
-            'checked_at' => time(),
-        ];
-        $this->saveJson($this->dataDir . '/last-diff.json', $state);
-
-        $groupLabels = [];
-        foreach ($groups as $key => $group) {
-            $groupLabels[$key] = $group['label'];
+        if (empty($job['scan_queue'])) {
+            $job['phase'] = 'compare';
+            $job['paths'] = array_values(array_unique(array_merge(array_keys($job['local']), array_keys($job['remote']))));
+            $job['compare_total'] = count($job['paths']);
         }
 
+        $this->saveJson($this->dataDir . '/check-job.json', $job);
+
         return [
-            'groups' => $groupLabels,
-            'rows' => $rows,
-            'cold_start' => empty($baseline),
+            'done' => $job['scan_done'],
+            'total' => $job['scan_total'],
+            'finished' => false,
+            'label' => 'Scanning',
+        ];
+    }
+
+    /**
+     * So sánh 1 batch path (tối đa $batchSize) từ hàng đợi đã xây khi pha
+     * scan xong — tái dùng DiffEngine::diff() trên đúng lát cắt local/remote
+     * của batch này, kèm hook sameSizeContentDiffers() (tải nội dung remote
+     * để hash khi size trùng). Khi hàng đợi rút cạn, lưu kết quả gộp vào
+     * last-diff.json (để startSyncJob dùng lại) và xoá check-job.json.
+     */
+    private function stepCheckDiffCompare(array $job, int $batchSize): array
+    {
+        $files = $job['files'];
+        $rows = $job['rows'];
+
+        $batchPaths = array_splice($job['paths'], 0, $batchSize);
+
+        if (!empty($batchPaths)) {
+            $wanted = array_flip($batchPaths);
+            $localBatch = array_intersect_key($job['local'], $wanted);
+            $remoteBatch = array_intersect_key($job['remote'], $wanted);
+
+            $ftp = new FtpClient();
+            $this->connectFtp($ftp);
+            try {
+                $rows += (new DiffEngine())->diff($localBatch, $remoteBatch, function (string $path) use ($files, $ftp): bool {
+                    return $this->sameSizeContentDiffers($files[$path]['local'], $files[$path]['remote'], $ftp);
+                });
+            } finally {
+                $ftp->close();
+            }
+
+            $job['compare_done'] += count($batchPaths);
+        }
+
+        $job['rows'] = $rows;
+        $finished = empty($job['paths']);
+
+        if ($finished) {
+            $state = [
+                'groups' => $job['groups'],
+                'local' => $job['local'],
+                'remote' => $job['remote'],
+                'baseline' => $job['baseline'],
+                'rows' => $rows,
+                'checked_at' => time(),
+            ];
+            $this->saveJson($this->dataDir . '/last-diff.json', $state);
+            @unlink($this->dataDir . '/check-job.json');
+
+            $groupLabels = [];
+            foreach ($job['groups'] as $key => $group) {
+                $groupLabels[$key] = $group['label'];
+            }
+
+            return [
+                'done' => $job['compare_done'],
+                'total' => $job['compare_total'],
+                'finished' => true,
+                'label' => 'Comparing',
+                'groups' => $groupLabels,
+                'rows' => $rows,
+                'cold_start' => empty($job['baseline']),
+            ];
+        }
+
+        $this->saveJson($this->dataDir . '/check-job.json', $job);
+
+        return [
+            'done' => $job['compare_done'],
+            'total' => $job['compare_total'],
+            'finished' => false,
+            'label' => 'Comparing',
         ];
     }
 
@@ -484,8 +604,9 @@ class SyncManager
     }
 
     /**
-     * Bước 1/2: xây hàng đợi thao tác từ kết quả diff đã lưu ở checkDiff()
-     * + lựa chọn resolution của người dùng, lưu vào sync-job.json.
+     * Bước 1/2: xây hàng đợi thao tác từ kết quả diff đã lưu ở
+     * stepCheckDiffJob() (khi finished) + lựa chọn resolution của người
+     * dùng, lưu vào sync-job.json.
      * $resolutions: relPath (đã có tiền tố group) =>
      * 'local'|'remote'|'delete_local'|'delete_remote' (rỗng/thiếu = bỏ
      * qua). Vocabulary áp dụng đồng nhất cho MỌI loại row (push/pull/

@@ -163,9 +163,12 @@ HTML;
         $controller = $event['controller'];
         $task = $controller->task ?? '';
 
-        if ($task === 'ftpsynccheckdiff') {
+        if ($task === 'ftpsynccheckdiffstart') {
             $event->stopPropagation();
-            $this->handleCheckDiff($controller->post ?? []);
+            $this->handleCheckDiffStart($controller->post ?? []);
+        } elseif ($task === 'ftpsynccheckdiffstep') {
+            $event->stopPropagation();
+            $this->handleCheckDiffStep($controller->post ?? []);
         } elseif ($task === 'ftpsyncsyncstart') {
             $event->stopPropagation();
             $this->handleSyncStart($controller->post ?? []);
@@ -199,7 +202,8 @@ HTML;
         }
     }
 
-    private function handleCheckDiff(array $post): void
+    /** Bước 1/2 của "Check differences": xây hàng đợi path cần so sánh, trả về job_id + tổng số để UI vẽ progress bar. */
+    private function handleCheckDiffStart(array $post): void
     {
         if (!$this->guardRequest()) {
             return;
@@ -208,7 +212,24 @@ HTML;
         $kinds = array_values((array) ($post['kinds'] ?? []));
 
         try {
-            $result = $this->syncManager()->checkDiff($kinds);
+            $result = $this->syncManager()->startCheckDiffJob($kinds);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 2/2: xử lý 1 batch của job "Check differences" — UI gọi lặp lại tới khi finished=true. */
+    private function handleCheckDiffStep(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $jobId = (string) ($post['job_id'] ?? '');
+
+        try {
+            $result = $this->syncManager()->stepCheckDiffJob($jobId);
             $this->grav['admin']->json_response = ['status' => 'success'] + $result;
         } catch (\Throwable $e) {
             $this->jsonError($e->getMessage());
