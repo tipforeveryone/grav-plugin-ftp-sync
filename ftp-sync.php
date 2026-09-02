@@ -3,6 +3,7 @@
 namespace Grav\Plugin;
 
 use Grav\Common\Plugin;
+use Grav\Plugin\FtpSync\FtpSyncApiController;
 use Grav\Plugin\FtpSync\SyncManager;
 use RocketTheme\Toolbox\Event\Event;
 
@@ -22,6 +23,8 @@ class FTPSyncPlugin extends Plugin
     {
         return [
             'onPluginsInitialized' => ['onPluginsInitialized', 0],
+            'onApiRegisterRoutes'  => ['onApiRegisterRoutes', 0],
+            'onApiSidebarItems'    => ['onApiSidebarItems', 0],
         ];
     }
 
@@ -40,6 +43,67 @@ class FTPSyncPlugin extends Plugin
             'onTwigInitialized' => ['onTwigInitialized', 0],
             'onOutputGenerated' => ['onOutputGenerated', 0],
         ]);
+    }
+
+    /**
+     * Admin2 counterpart to onAdminMenu() below — same admin.super-only
+     * visibility (via the `authorize` field, checked API-side), same
+     * "only when local/force_allow_remote" gate.
+     */
+    public function onApiSidebarItems(Event $event): void
+    {
+        if (!$this->config->get('plugins.ftp-sync.enabled', true) || !$this->isEnabled()) {
+            return;
+        }
+
+        $items = $event['items'] ?? [];
+        $items[] = [
+            'id'        => 'ftp-sync',
+            'plugin'    => 'ftp-sync',
+            'label'     => 'FTP Sync',
+            'icon'      => 'fa-exchange',
+            'route'     => '/plugin/ftp-sync',
+            'priority'  => 90,
+            'authorize' => ['api.super'],
+        ];
+        $event['items'] = $items;
+    }
+
+    /**
+     * Admin2 counterpart to the onAdminTaskExecute handlers below — thin
+     * REST wrapper, same SyncManager calls (see classes/FtpSyncApiController.php).
+     * registerAutoload() (called unconditionally above, for every request)
+     * already covers Grav\Plugin\FtpSync\*, so no extra require here.
+     */
+    public function onApiRegisterRoutes(Event $event): void
+    {
+        if (!$this->config->get('plugins.ftp-sync.enabled', true)) {
+            return;
+        }
+
+        $routes = $event['routes'];
+        $controller = FtpSyncApiController::class;
+
+        $routes->group('/ftp-sync', function ($group) use ($controller) {
+            $group->get('/status', [$controller, 'status']);
+            $group->get('/backups', [$controller, 'listBackups']);
+            $group->delete('/backups/{name}', [$controller, 'deleteBackup']);
+
+            $group->post('/check-diff', [$controller, 'startCheckDiff']);
+            $group->post('/check-diff/{jobId}/step', [$controller, 'stepCheckDiff']);
+
+            $group->post('/sync', [$controller, 'startSync']);
+            $group->post('/sync/{jobId}/step', [$controller, 'stepSync']);
+
+            $group->post('/push', [$controller, 'startPush']);
+            $group->post('/push/{jobId}/step', [$controller, 'stepPush']);
+
+            // Static paths before the {jobId} ones they share a prefix with.
+            $group->post('/full-deploy/mark-synced', [$controller, 'markFullDeploySynced']);
+            $group->post('/full-deploy', [$controller, 'startFullDeploy']);
+            $group->post('/full-deploy/{jobId}/step', [$controller, 'stepFullDeploy']);
+            $group->post('/full-deploy/{jobId}/cancel', [$controller, 'cancelFullDeploy']);
+        });
     }
 
     /**
