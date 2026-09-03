@@ -99,39 +99,6 @@ class FtpSyncApiController extends AbstractApiController
         return ApiResponse::create($this->syncManager()->stepSyncJob($jobId));
     }
 
-    /**
-     * Confirmation phrase the client must echo back after the user accepts
-     * the "this deletes everything on Hosting first" modal — checked again
-     * here (not just in the UI) so the destructive path can't be triggered
-     * by calling the endpoint directly. Kept identical to the admin-classic
-     * handler's constant.
-     */
-    private const FORCE_PUSH_CONFIRM_PHRASE = 'CONFIRMED';
-
-    public function startPush(ServerRequestInterface $request): ResponseInterface
-    {
-        $this->guard($request);
-
-        $body = $this->getRequestBody($request);
-        $confirm = trim((string) ($body['confirm'] ?? ''));
-        if ($confirm !== self::FORCE_PUSH_CONFIRM_PHRASE) {
-            throw new ValidationException('Confirmation mismatch — upload cancelled for safety.');
-        }
-
-        $kinds = array_values((array) ($body['kinds'] ?? []));
-
-        return ApiResponse::create($this->syncManager()->startPushJob($kinds));
-    }
-
-    public function stepPush(ServerRequestInterface $request): ResponseInterface
-    {
-        $this->guard($request);
-
-        $jobId = (string) $this->getRouteParam($request, 'jobId');
-
-        return ApiResponse::create($this->syncManager()->stepPushJob($jobId));
-    }
-
     public function startFullDeploy(ServerRequestInterface $request): ResponseInterface
     {
         $this->guard($request);

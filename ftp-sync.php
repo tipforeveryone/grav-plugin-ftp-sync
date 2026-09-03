@@ -95,9 +95,6 @@ class FTPSyncPlugin extends Plugin
             $group->post('/sync', [$controller, 'startSync']);
             $group->post('/sync/{jobId}/step', [$controller, 'stepSync']);
 
-            $group->post('/push', [$controller, 'startPush']);
-            $group->post('/push/{jobId}/step', [$controller, 'stepPush']);
-
             // Static paths before the {jobId} ones they share a prefix with.
             $group->post('/full-deploy/mark-synced', [$controller, 'markFullDeploySynced']);
             $group->post('/full-deploy', [$controller, 'startFullDeploy']);
@@ -239,12 +236,6 @@ HTML;
         } elseif ($task === 'ftpsyncsyncstep') {
             $event->stopPropagation();
             $this->handleSyncStep($controller->post ?? []);
-        } elseif ($task === 'ftpsyncpushstart') {
-            $event->stopPropagation();
-            $this->handlePushStart($controller->post ?? []);
-        } elseif ($task === 'ftpsyncpushstep') {
-            $event->stopPropagation();
-            $this->handlePushStep($controller->post ?? []);
         } elseif ($task === 'ftpsyncfulldeploystart') {
             $event->stopPropagation();
             $this->handleFullDeployStart($controller->post ?? []);
@@ -335,57 +326,9 @@ HTML;
     }
 
     /**
-     * Confirmation token the client sends after the user clicks "Yes" in the
-     * modal — checked again on the server to make sure the request actually
-     * went through the UI confirmation step, rather than calling the task
-     * directly.
-     */
-    private const FORCE_PUSH_CONFIRM_PHRASE = 'CONFIRMED';
-
-    /** Bước 1/2 của "Replace local sync to hosting" / "Full deploy to hosting": xây hàng đợi xoá+upload. */
-    private function handlePushStart(array $post): void
-    {
-        if (!$this->guardRequest()) {
-            return;
-        }
-
-        $confirm = trim((string) ($post['confirm'] ?? ''));
-        if ($confirm !== self::FORCE_PUSH_CONFIRM_PHRASE) {
-            $this->jsonError('Confirmation mismatch — upload cancelled for safety.');
-            return;
-        }
-
-        $kinds = array_values((array) ($post['kinds'] ?? []));
-
-        try {
-            $result = $this->syncManager()->startPushJob($kinds);
-            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
-        } catch (\Throwable $e) {
-            $this->jsonError($e->getMessage());
-        }
-    }
-
-    /** Bước 2/2: xử lý 1 batch của job push — UI gọi lặp lại tới khi finished=true. */
-    private function handlePushStep(array $post): void
-    {
-        if (!$this->guardRequest()) {
-            return;
-        }
-
-        $jobId = (string) ($post['job_id'] ?? '');
-
-        try {
-            $result = $this->syncManager()->stepPushJob($jobId);
-            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
-        } catch (\Throwable $e) {
-            $this->jsonError($e->getMessage());
-        }
-    }
-
-    /**
      * Bước 1/2 của "Full deploy" — CHỈ nén site thành 1 file .zip local,
      * không xoá và không upload gì lên hosting (người dùng tự làm 2 việc
-     * đó thủ công), nên không cần xác nhận nguy hiểm như handlePushStart().
+     * đó thủ công), nên không cần xác nhận nguy hiểm dạng confirm-phrase.
      */
     private function handleFullDeployStart(array $post): void
     {

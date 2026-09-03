@@ -11,7 +11,45 @@
 
 const TAG = window.__GRAV_PAGE_TAG;
 const API_BASE = (window.__GRAV_API_SERVER_URL || '') + (window.__GRAV_API_PREFIX || '/api/v1');
-const API_TOKEN = window.__GRAV_API_TOKEN;
+// Fallback only: window.__GRAV_API_TOKEN is a one-time snapshot taken when
+// admin2 first imports this page component (see the SvelteKit host's
+// PluginPage loader) and is never refreshed afterwards, even though the host
+// app keeps rotating the real access token in localStorage every time it
+// silently refreshes (see chunks/CA2JBzYV.js's setTokens()/refresh cycle).
+// A ftp-sync session commonly stays open long enough (reviewing a diff,
+// then hitting Sync) to outlive the snapshot, which used to surface as a
+// bare "Request failed (401)" on whatever action ran after the token had
+// since rotated. currentAccessToken() below always re-reads the live token
+// from the same localStorage key the host app itself writes to.
+const API_TOKEN_FALLBACK = window.__GRAV_API_TOKEN;
+
+function currentAccessToken() {
+    try {
+        const keys = ['grav_admin_auth::/admin2', 'grav_admin_auth'];
+        for (const key of keys) {
+            const raw = localStorage.getItem(key);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed.accessToken === 'string' && parsed.accessToken) {
+                    return parsed.accessToken;
+                }
+            }
+        }
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.indexOf('grav_admin_auth') === 0) {
+                const raw = localStorage.getItem(key);
+                const parsed = raw ? JSON.parse(raw) : null;
+                if (parsed && typeof parsed.accessToken === 'string' && parsed.accessToken) {
+                    return parsed.accessToken;
+                }
+            }
+        }
+    } catch (e) {
+        // localStorage unavailable -> fall back to the load-time snapshot.
+    }
+    return API_TOKEN_FALLBACK;
+}
 
 const KINDS = [
     ['pages', 'Pages', 'user/pages (all page content)'],
@@ -34,8 +72,6 @@ const RESOLUTION_OPTIONS = [
     ['delete_local', 'Delete on Local'],
     ['delete_remote', 'Delete on Hosting'],
 ];
-
-const FORCE_PUSH_CONFIRM_PHRASE = 'CONFIRMED';
 
 function defaultResolution(row) {
     if (row.type === 'changed') {
@@ -106,8 +142,6 @@ class FtpSyncPage extends HTMLElement {
         this._backupPath = '';
         this._lastRows = {};
         this._fullDeployCancelToken = null;
-        this._pushMode = null;
-        this._pushKinds = [];
     }
 
     connectedCallback() {
@@ -119,11 +153,12 @@ class FtpSyncPage extends HTMLElement {
     }
 
     async _fetch(path, options = {}) {
+        const token = currentAccessToken();
         const res = await fetch(API_BASE + path, {
             ...options,
             headers: {
                 'Content-Type': 'application/json',
-                ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
                 ...(options.headers || {}),
             },
         });
@@ -151,7 +186,7 @@ class FtpSyncPage extends HTMLElement {
         const wrapper = this.querySelector('.fts-wrapper');
         wrapper.innerHTML = `
             ${!this._isEnabled ? `<div class="fts-notice fts-notice-error"><i class="fa fa-exclamation-triangle"></i> Plugin not work on live site, only local host.</div>` : ''}
-            ${this._isEnabled && !this._isLocal ? `<div class="fts-notice fts-notice-error">This does not look like a local environment (no .ddev/ folder found) — "Sync now" / "Replace local sync" / "Full deploy" are locked. Enable <code>force_allow_remote</code> in the plugin config if you really want to skip this check.</div>` : ''}
+            ${this._isEnabled && !this._isLocal ? `<div class="fts-notice fts-notice-error">This does not look like a local environment (no .ddev/ folder found) — "Sync now" / "Full deploy" are locked. Enable <code>force_allow_remote</code> in the plugin config if you really want to skip this check.</div>` : ''}
 
             <div class="fts-top">
                 <div class="fts-notice">
@@ -169,7 +204,6 @@ class FtpSyncPage extends HTMLElement {
                 <div class="fts-toolbar">
                     <button type="button" class="fts-btn" data-action="check-diff" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-refresh"></i> Check differences</button>
                     <button type="button" class="fts-btn fts-btn-primary" data-action="sync-now" disabled><i class="fa fa-cloud-upload"></i> Sync now</button>
-                    <button type="button" class="fts-btn" data-action="replace-sync" ${this._isEnabled && this._isLocal ? '' : 'disabled'} title="Delete all files currently on Hosting (within the checked categories), then upload everything from Local."><i class="fa fa-warning"></i> Replace local sync to hosting</button>
                     <button type="button" class="fts-btn" data-action="full-deploy" ${this._isEnabled && this._isLocal ? '' : 'disabled'} title="Bundles the ENTIRE site into one .zip. Deleting old files on hosting and uploading is up to you."><i class="fa fa-rocket"></i> Compress full site</button>
                     <button type="button" class="fts-btn" data-action="mark-synced" style="display:none" ${this._isLocal ? '' : 'disabled'} title="Click ONLY after you have manually uploaded and extracted this zip on Hosting."><i class="fa fa-check"></i> Mark as deployed</button>
                     <button type="button" class="fts-btn" data-action="show-backups" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-archive"></i> Show backups</button>
@@ -185,28 +219,19 @@ class FtpSyncPage extends HTMLElement {
             <div class="fts-backups" style="display:none">
                 <div class="fts-backup-location">
                     <span>Backup folder: <code>${this._escape(this._backupPath)}</code> (relative to the project root)</span>
-                    <button type="button" class="fts-btn" data-action="copy-backup-path"><i class="fa fa-clipboard"></i> Copy location</button>
+                    <div class="fts-backup-location-actions">
+                        <button type="button" class="fts-btn" data-action="delete-selected-backups"><i class="fa fa-trash"></i> Delete selected</button>
+                        <button type="button" class="fts-btn" data-action="copy-backup-path"><i class="fa fa-clipboard"></i> Copy location</button>
+                    </div>
                 </div>
                 <table class="fts-table fts-backups-table">
-                    <thead><tr><th>File name</th><th class="fts-col-meta">Size</th><th class="fts-col-meta">Created</th><th class="fts-col-action"></th></tr></thead>
+                    <thead><tr><th class="fts-col-checkbox"><input type="checkbox" class="fts-backup-select-all"></th><th class="fts-col-name">File name</th><th class="fts-col-meta fts-col-size">Size</th><th class="fts-col-meta fts-col-created">Created</th><th class="fts-col-action"></th></tr></thead>
                     <tbody></tbody>
                 </table>
             </div>
 
             <div class="fts-status"></div>
             <div class="fts-hint" style="display:none"><i class="fa fa-info-circle"></i> Đã tự tay upload + giải nén file zip này lên Hosting? Bấm "Mark as deployed" để cập nhật lại trạng thái đồng bộ.</div>
-
-            <div class="fts-modal-overlay" style="display:none">
-                <div class="fts-modal-box">
-                    <div class="fts-modal-title"><i class="fa fa-exclamation-triangle"></i> <span class="fts-confirm-title">Confirm upload</span></div>
-                    <p class="fts-confirm-desc"></p>
-                    <p>Are you sure you want to continue?</p>
-                    <div class="fts-modal-actions">
-                        <button type="button" class="fts-btn fts-btn-primary" data-action="confirm-yes">Yes, upload</button>
-                        <button type="button" class="fts-btn" data-action="confirm-no">No</button>
-                    </div>
-                </div>
-            </div>
 
             <div class="fts-results" style="display:none">
                 <div class="fts-filters">
@@ -227,6 +252,15 @@ class FtpSyncPage extends HTMLElement {
                     <button type="button" class="fts-btn" data-action="apply-filter">Apply filter</button>
                 </div>
                 <div class="fts-bulk">
+                    <label>Select all:
+                        <select class="fts-quick-select">
+                            <option value="">— Choose —</option>
+                            <option value="local_newer">Local Newer</option>
+                            <option value="host_newer">Hosting Newer</option>
+                            <option value="local_only">Only Local</option>
+                            <option value="host_only">Only Hosting</option>
+                        </select>
+                    </label>
                     <label>Apply to selected rows:
                         <select class="fts-bulk-action">
                             <option value="local">Use Local version</option>
@@ -253,7 +287,6 @@ class FtpSyncPage extends HTMLElement {
     _bindEvents() {
         this._q('[data-action="check-diff"]')?.addEventListener('click', () => this._runCheckDiff());
         this._q('[data-action="sync-now"]')?.addEventListener('click', () => this._runSync());
-        this._q('[data-action="replace-sync"]')?.addEventListener('click', () => this._openConfirmModal('replace'));
         this._q('[data-action="full-deploy"]')?.addEventListener('click', () => this._runFullDeploy());
         this._q('[data-action="mark-synced"]')?.addEventListener('click', () => this._runMarkSynced());
         this._q('[data-action="cancel-compress"]')?.addEventListener('click', () => this._requestCancelFullDeploy());
@@ -262,15 +295,18 @@ class FtpSyncPage extends HTMLElement {
         this._q('[data-action="apply-filter"]')?.addEventListener('click', () => this._applyFilters());
         this._q('[data-action="bulk-apply"]')?.addEventListener('click', () => this._bulkApply());
         this._q('.fts-select-all')?.addEventListener('change', (e) => this._selectAll(e.target.checked));
-        this._q('[data-action="confirm-no"]')?.addEventListener('click', () => this._closeConfirmModal('Upload cancelled.'));
-        this._q('[data-action="confirm-yes"]')?.addEventListener('click', () => this._confirmPush());
-        this._q('.fts-modal-overlay')?.addEventListener('click', (e) => {
-            if (e.target.classList.contains('fts-modal-overlay')) this._closeConfirmModal('Upload cancelled.');
+        this._q('.fts-quick-select')?.addEventListener('change', (e) => {
+            this._quickSelect(e.target.value);
+            e.target.value = '';
         });
         this._q('.fts-backups-table tbody')?.addEventListener('click', (e) => {
             const btn = e.target.closest('button[data-name]');
             if (btn) this._deleteBackup(btn.dataset.name);
         });
+        this._q('.fts-backup-select-all')?.addEventListener('change', (e) => {
+            this.querySelectorAll('.fts-backup-select').forEach((cb) => { cb.checked = e.target.checked; });
+        });
+        this._q('[data-action="delete-selected-backups"]')?.addEventListener('click', () => this._deleteSelectedBackups());
     }
 
     _setStatus(message, isError) {
@@ -413,6 +449,43 @@ class FtpSyncPage extends HTMLElement {
         });
     }
 
+    /**
+     * "Select all: [Local Newer / Hosting Newer / Only Local / Only Hosting]"
+     * — checks exactly the rows matching that quick category (unchecking
+     * everything else), scoped to whatever the Category/Status filters
+     * above currently show. Meant to be chained straight into the existing
+     * "Apply to selected rows" bulk action below, e.g. pick "Local Newer"
+     * then bulk-apply "Use Local version" to push just those.
+     */
+    _quickSelect(kind) {
+        const matchers = {
+            local_newer: (row) => row.type === 'changed' && row.newer === 'local',
+            host_newer: (row) => row.type === 'changed' && row.newer === 'remote',
+            local_only: (row) => row.type === 'missing_remote',
+            host_only: (row) => row.type === 'missing_local',
+        };
+        const matcher = matchers[kind];
+        if (!matcher) return;
+
+        let count = 0;
+        this.querySelectorAll('.fts-diff-table tbody tr').forEach((tr) => {
+            if (tr.style.display === 'none') return;
+            const cb = tr.querySelector('.fts-row-select');
+            const row = this._lastRows[tr.dataset.path];
+            if (!cb || !row) return;
+            cb.checked = matcher(row);
+            if (cb.checked) count++;
+        });
+
+        const allSelectAll = this._q('.fts-select-all');
+        if (allSelectAll) {
+            const visibleRows = [...this.querySelectorAll('.fts-diff-table tbody tr')].filter((tr) => tr.style.display !== 'none');
+            allSelectAll.checked = visibleRows.length > 0 && visibleRows.every((tr) => tr.querySelector('.fts-row-select')?.checked);
+        }
+
+        this._setStatus(count === 0 ? `No rows match "${kind.replace('_', ' ')}".` : `Selected ${count} row(s) matching "${kind.replace('_', ' ')}".`, count === 0);
+    }
+
     _bulkApply() {
         const value = this._q('.fts-bulk-action').value;
         let count = 0;
@@ -470,71 +543,6 @@ class FtpSyncPage extends HTMLElement {
         }
     }
 
-    _openConfirmModal(mode) {
-        let kinds = [];
-        if (mode === 'replace') {
-            kinds = this._selectedKinds();
-            if (kinds.length === 0) {
-                this._setStatus('Select at least 1 category before uploading.', true);
-                return;
-            }
-        }
-        this._pushMode = mode;
-        this._pushKinds = kinds;
-        this._q('.fts-confirm-title').textContent = 'Confirm: replace local sync to hosting';
-        this._q('.fts-confirm-desc').innerHTML = 'This will <b>DELETE ALL</b> files currently on Hosting (within the categories you have checked above), then upload everything from Local to replace them. Anything that only exists on Hosting will be lost — the system backs up the Hosting copy before deleting, but confirm Local is correct first.';
-        this._q('.fts-modal-overlay').style.display = '';
-    }
-
-    _closeConfirmModal(statusMessage) {
-        this._q('.fts-modal-overlay').style.display = 'none';
-        if (statusMessage) this._setStatus(statusMessage, false);
-    }
-
-    async _confirmPush() {
-        const mode = this._pushMode;
-        const kinds = this._pushKinds;
-        this._q('.fts-modal-overlay').style.display = 'none';
-        await this._runPushJob(mode, kinds);
-    }
-
-    async _runPushJob(mode, kinds) {
-        const btn = this._q('[data-action="replace-sync"]');
-        this._setStatus('Preparing file list...', false);
-        btn.disabled = true;
-
-        try {
-            const data = await this._fetch('/ftp-sync/push', {
-                method: 'POST',
-                body: JSON.stringify({ kinds, confirm: FORCE_PUSH_CONFIRM_PHRASE }),
-            });
-            if (data.total === 0) {
-                this._setStatus('Nothing to upload.', false);
-                btn.disabled = !this._isLocal;
-                return;
-            }
-            this._showProgress(0, data.total, 'Uploading');
-            await this._runBatchedJob(
-                () => this._fetch(`/ftp-sync/push/${data.job_id}/step`, { method: 'POST', body: '{}' }),
-                'Uploading',
-                (finalData) => {
-                    let msg = `Deleted ${finalData.deleted} old file(s) on Hosting and uploaded ${finalData.uploaded} file(s) from Local` +
-                        (finalData.groups ? ` (${finalData.groups} categor${finalData.groups === 1 ? 'y' : 'ies'})` : '') + '.';
-                    if (finalData.backup) msg += ` Backup: ${finalData.backup}`;
-                    this._setStatus(msg, false);
-                    this._q('.fts-results').style.display = 'none';
-                    btn.disabled = !this._isLocal;
-                },
-                (message) => {
-                    this._setStatus('Error: ' + message, true);
-                    btn.disabled = !this._isLocal;
-                },
-            );
-        } catch (err) {
-            this._setStatus('Error: ' + err.message, true);
-            btn.disabled = !this._isLocal;
-        }
-    }
 
     async _runFullDeploy() {
         const btn = this._q('[data-action="full-deploy"]');
@@ -655,12 +663,16 @@ class FtpSyncPage extends HTMLElement {
 
         tbody.innerHTML = backups.map((b) => `
             <tr>
-                <td>${this._escape(b.name)}</td>
-                <td class="fts-col-meta">${formatSize(b.size)}</td>
-                <td class="fts-col-meta">${formatDate(b.created)}</td>
+                <td class="fts-col-checkbox"><input type="checkbox" class="fts-backup-select" value="${this._escape(b.name)}"></td>
+                <td class="fts-col-name" title="${this._escape(b.name)}">${this._escape(b.name)}</td>
+                <td class="fts-col-meta fts-col-size">${formatSize(b.size)}</td>
+                <td class="fts-col-meta fts-col-created">${formatDate(b.created)}</td>
                 <td class="fts-col-action"><button type="button" class="fts-btn" data-name="${this._escape(b.name)}"><i class="fa fa-trash"></i></button></td>
             </tr>
         `).join('');
+
+        const selectAll = this._q('.fts-backup-select-all');
+        if (selectAll) selectAll.checked = false;
 
         box.style.display = '';
         this._setStatus(`${backups.length} backup(s).`, false);
@@ -685,6 +697,46 @@ class FtpSyncPage extends HTMLElement {
         } catch (err) {
             this._setStatus('Error: ' + err.message, true);
         }
+    }
+
+    /**
+     * "Delete selected" — there's no bulk-delete route (see
+     * FtpSyncApiController::deleteBackup(), one file per request), so this
+     * just calls the same single-delete endpoint once per checked row and
+     * refreshes the list at the end, reporting how many failed if any did.
+     */
+    async _deleteSelectedBackups() {
+        const names = [...this.querySelectorAll('.fts-backup-select')].filter((cb) => cb.checked).map((cb) => cb.value);
+        if (names.length === 0) {
+            this._setStatus('No backups selected to delete.', true);
+            return;
+        }
+        if (!window.confirm(`Delete ${names.length} selected backup(s)? This cannot be undone.`)) return;
+
+        this._setStatus(`Deleting ${names.length} backup(s)...`, false);
+        let failed = 0;
+        for (const name of names) {
+            try {
+                await this._fetch(`/ftp-sync/backups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+            } catch (err) {
+                failed++;
+                console.error(`Failed to delete backup "${name}":`, err);
+            }
+        }
+
+        try {
+            const data = await this._fetch('/ftp-sync/backups');
+            this._renderBackups(data.backups || []);
+        } catch (err) {
+            this._setStatus('Error: ' + err.message, true);
+            return;
+        }
+
+        const deleted = names.length - failed;
+        this._setStatus(
+            failed === 0 ? `Deleted ${deleted} backup(s).` : `Deleted ${deleted} backup(s), ${failed} failed (see console).`,
+            failed > 0,
+        );
     }
 
     _escape(str) {
@@ -715,11 +767,18 @@ class FtpSyncPage extends HTMLElement {
                 .fts-progress-fill { height: 100%; background: var(--primary, #3b82f6); width: 0; transition: width 0.2s ease; }
                 .fts-progress-label { font-size: 12px; color: var(--muted-foreground, #6b7280); margin-top: 4px; }
                 .fts-backup-location { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; background: var(--accent, #f3f4f6); border-radius: 6px; font-size: 12.5px; }
+                .fts-backup-location-actions { display: flex; flex-wrap: wrap; gap: 8px; }
                 .fts-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
                 .fts-table th { text-align: left; padding: 6px 8px; color: var(--muted-foreground, #6b7280); border-bottom: 1px solid var(--border, #e5e7eb); }
                 .fts-table td { padding: 6px 8px; border-bottom: 1px solid var(--border, #e5e7eb); vertical-align: middle; }
                 .fts-col-checkbox, .fts-col-status, .fts-col-meta { text-align: center; }
                 .fts-col-action { text-align: right; }
+                .fts-backups-table { table-layout: fixed; }
+                .fts-backups-table .fts-col-checkbox { width: 34px; }
+                .fts-backups-table .fts-col-name { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                .fts-backups-table .fts-col-size { width: 90px; }
+                .fts-backups-table .fts-col-created { width: 150px; }
+                .fts-backups-table .fts-col-action { width: 50px; }
                 .fts-status-conflict { color: var(--destructive, #dc2626); font-weight: 600; }
                 .fts-status-x { color: var(--success, #16a34a); font-weight: 700; }
                 .fts-status-newer { color: #1f6fb2; font-weight: 600; }
@@ -730,10 +789,6 @@ class FtpSyncPage extends HTMLElement {
                 .fts-status { font-size: 13px; color: var(--foreground, #1f2937); }
                 .fts-status-error { color: var(--destructive, #dc2626); }
                 .fts-hint { font-size: 12.5px; color: var(--muted-foreground, #6b7280); }
-                .fts-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-                .fts-modal-box { background: var(--card, #fff); border-radius: 8px; padding: 20px; max-width: 480px; width: 90%; }
-                .fts-modal-title { font-weight: 600; margin-bottom: 10px; color: var(--destructive, #dc2626); }
-                .fts-modal-actions { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
                 .fts-error { color: var(--destructive, #dc2626); }
                 code { background: var(--accent, #f3f4f6); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
             </style>

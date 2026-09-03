@@ -6,7 +6,6 @@ A Grav plugin that adds a dedicated Admin Panel page to sync site content betwee
 
 - **Check differences**: scans local + hosting, compares by `mtime` + `size`, and reports new/deleted/conflicting files (changed on both sides) per content group (Pages, Themes, Plugins, Config, Accounts).
 - **Sync now**: applies your per-file choice (keep Local / keep Hosting / delete on either side) after running Check differences.
-- **Replace local sync to hosting**: deletes everything currently on hosting (within the checked groups) and re-uploads everything from local — use this to make hosting match local exactly.
 - **Full deploy to hosting**: ignores the checkboxes/config entirely — scans the **whole site** (`system/`, `vendor/`, all of `user/`, root files like `index.php`/`.htaccess`...), excluding only what has no effect on the running site (dev/test/docs files, runtime caches, `.git`...). Deletes the corresponding content on hosting, bundles everything else into **one `.zip` file**, and uploads it to the hosting root. Use this for a brand-new hosting deploy or to fully reset a broken/messy hosting copy. **You need to extract the zip yourself on hosting** (File Manager / SSH) — the plugin does not auto-extract it.
 - **Automatic backups**: before overwriting or deleting any file on hosting, the previous version is automatically zipped into `user/data/ftp-sync/backups/*.zip`. Backups can be viewed/deleted right from the Admin page.
 - **Real progress bars**: multi-file uploads/syncs are split into small sequential AJAX batches instead of one long-running request, so large sites don't time out.
@@ -34,8 +33,8 @@ Go to `Admin > Plugins > FTP Sync` and fill in:
 | **Allow running even when not detected as local** | Bypasses the local-environment check — **not recommended**, only enable if you understand the risk |
 | **Auto-backup before overwriting** | Enable/disable the automatic backup mechanism |
 | **Root directory on hosting** | Absolute FTP path matching the site's webroot on hosting, e.g. `/public_html/eznotary` |
-| **Plugins to sync** | List of plugin names (under `user/plugins/`) to sync via "Sync now"/"Replace local sync" — leave empty to auto-sync ALL plugins. Does not affect "Full deploy" (which always includes everything). |
-| **File/folder patterns to skip when syncing** | Comma-separated exclude patterns, supports `*`, applies to "Check differences"/"Sync now"/"Replace local sync" and is also respected on top of "Full deploy"'s own exclusions |
+| **Plugins to sync** | List of plugin names (under `user/plugins/`) to sync via "Sync now" — leave empty to auto-sync ALL plugins. Does not affect "Full deploy" (which always includes everything). |
+| **File/folder patterns to skip when syncing** | Comma-separated exclude patterns, supports `*`, applies to "Check differences"/"Sync now" and is also respected on top of "Full deploy"'s own exclusions |
 | **FTP Host / Port / Username / Password** | FTP connection details |
 | **Use FTPS** | Enable if hosting requires FTP over SSL |
 | **Passive mode** | Most shared hosting requires passive mode enabled |
@@ -46,7 +45,6 @@ Go to `Admin > Plugins > FTP Sync` and fill in:
 2. Pick the content groups you want to act on in the left panel: **Pages / Themes / Plugins / Config / Accounts**.
 3. Pick an action in the right panel:
    - **Check differences** → review the list of differing files → choose an action per row (or bulk-apply to a selection) → **Sync now**.
-   - **Replace local sync to hosting** → confirm in the warning dialog → hosting will match local 100% (within the checked groups).
    - **Full deploy to hosting** → confirm in the warning dialog → the entire site is bundled into one `.zip` and uploaded to the hosting root → **you extract it yourself** on hosting.
 4. **Show backups** → view/delete automatically created backups.
 
