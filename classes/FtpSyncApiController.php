@@ -48,7 +48,7 @@ class FtpSyncApiController extends AbstractApiController
     {
         $this->guard($request);
 
-        return ApiResponse::create(['backups' => $this->syncManager()->listBackups()]);
+        return ApiResponse::create(['backups' => $this->run(fn (SyncManager $sm) => $sm->listBackups())]);
     }
 
     public function deleteBackup(ServerRequestInterface $request): ResponseInterface
@@ -56,7 +56,7 @@ class FtpSyncApiController extends AbstractApiController
         $this->guard($request);
 
         $name = (string) $this->getRouteParam($request, 'name');
-        $this->syncManager()->deleteBackup($name);
+        $this->run(fn (SyncManager $sm) => $sm->deleteBackup($name));
 
         return ApiResponse::noContent();
     }
@@ -68,7 +68,7 @@ class FtpSyncApiController extends AbstractApiController
         $body = $this->getRequestBody($request);
         $kinds = array_values((array) ($body['kinds'] ?? []));
 
-        return ApiResponse::create($this->syncManager()->startCheckDiffJob($kinds));
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->startCheckDiffJob($kinds)));
     }
 
     public function stepCheckDiff(ServerRequestInterface $request): ResponseInterface
@@ -77,7 +77,7 @@ class FtpSyncApiController extends AbstractApiController
 
         $jobId = (string) $this->getRouteParam($request, 'jobId');
 
-        return ApiResponse::create($this->syncManager()->stepCheckDiffJob($jobId));
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->stepCheckDiffJob($jobId)));
     }
 
     public function startSync(ServerRequestInterface $request): ResponseInterface
@@ -87,7 +87,7 @@ class FtpSyncApiController extends AbstractApiController
         $body = $this->getRequestBody($request);
         $resolutions = (array) ($body['resolutions'] ?? []);
 
-        return ApiResponse::create($this->syncManager()->startSyncJob($resolutions));
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->startSyncJob($resolutions)));
     }
 
     public function stepSync(ServerRequestInterface $request): ResponseInterface
@@ -96,14 +96,14 @@ class FtpSyncApiController extends AbstractApiController
 
         $jobId = (string) $this->getRouteParam($request, 'jobId');
 
-        return ApiResponse::create($this->syncManager()->stepSyncJob($jobId));
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->stepSyncJob($jobId)));
     }
 
     public function startFullDeploy(ServerRequestInterface $request): ResponseInterface
     {
         $this->guard($request);
 
-        return ApiResponse::create($this->syncManager()->startFullDeployJob());
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->startFullDeployJob()));
     }
 
     public function stepFullDeploy(ServerRequestInterface $request): ResponseInterface
@@ -112,7 +112,7 @@ class FtpSyncApiController extends AbstractApiController
 
         $jobId = (string) $this->getRouteParam($request, 'jobId');
 
-        return ApiResponse::create($this->syncManager()->stepFullDeployJob($jobId));
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->stepFullDeployJob($jobId)));
     }
 
     public function cancelFullDeploy(ServerRequestInterface $request): ResponseInterface
@@ -120,7 +120,7 @@ class FtpSyncApiController extends AbstractApiController
         $this->guard($request);
 
         $jobId = (string) $this->getRouteParam($request, 'jobId');
-        $this->syncManager()->cancelFullDeployJob($jobId);
+        $this->run(fn (SyncManager $sm) => $sm->cancelFullDeployJob($jobId));
 
         return ApiResponse::create(['status' => 'ok']);
     }
@@ -129,7 +129,7 @@ class FtpSyncApiController extends AbstractApiController
     {
         $this->guard($request);
 
-        return ApiResponse::create($this->syncManager()->markFullDeploySynced());
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->markFullDeploySynced()));
     }
 
     /** Same two-part gate as classic-admin's guardRequest(): api.super, and the local/force_allow_remote check. */
@@ -139,6 +139,39 @@ class FtpSyncApiController extends AbstractApiController
 
         if (!$this->isEnabled()) {
             throw new ValidationException('FTP Sync is disabled: this is not a local development environment.');
+        }
+    }
+
+    /**
+     * Every SyncManager job method throws plain \RuntimeException for
+     * foreseeable, user-actionable failures (wrong FTP username/password, job
+     * expired, nothing selected...) — see FtpClient::connect() and
+     * SyncManager's job methods. Left uncaught, those bubble past this
+     * controller as an "unhandled exception", which the API's global handler
+     * intentionally redacts into a bare 500 "Internal Server Error" (correct
+     * behavior for a genuine bug, but it also swallowed the real, helpful
+     * message for these expected cases — the admin2 page then only had a
+     * generic "Request failed (500)" to show, no matter how good the
+     * exception message was). Converting to ValidationException here
+     * preserves the real message through to the response's `detail` field.
+     *
+     * ApiException (ValidationException included) also extends
+     * \RuntimeException, so it's checked first and rethrown as-is —
+     * otherwise a legitimate ApiException thrown deeper down would get
+     * needlessly double-wrapped.
+     *
+     * @template T
+     * @param callable(SyncManager): T $fn
+     * @return T
+     */
+    private function run(callable $fn)
+    {
+        try {
+            return $fn($this->syncManager());
+        } catch (\Grav\Plugin\Api\Exceptions\ApiException $e) {
+            throw $e;
+        } catch (\RuntimeException $e) {
+            throw new ValidationException($e->getMessage());
         }
     }
 
