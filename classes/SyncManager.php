@@ -31,7 +31,13 @@ class SyncManager
         'LICENSE' => true, 'LICENSE.txt' => true, 'LICENSE.md' => true, 'README.md' => true, 'SECURITY.md' => true,
         'codeception.yml' => true, 'composer.json' => true, 'composer.lock' => true, 'now.json' => true,
         'backup' => true, 'cache' => true, 'logs' => true, 'tmp' => true, 'tests' => true,
-        'webserver-configs' => true, 'bin' => true, 'node_modules' => true,
+        // 'bin' KHÔNG được loại — Grav\Common\GPM\Installer::isGravInstance()
+        // (dùng bởi self-upgrade Grav qua Admin/admin2) đòi hỏi bin/ phải tồn
+        // tại trên đích mới coi là "Grav instance hợp lệ", nên thiếu nó khiến
+        // "GPM self-upgrade" trên hosting báo "Target directory is not a
+        // valid Grav instance." dù site vẫn chạy bình thường qua HTTP (đã
+        // xảy ra thật — bin/ chưa từng lên hosting qua Full Deploy).
+        'webserver-configs' => true, 'node_modules' => true,
         // assets/ và images/ ở GỐC là cache pipeline CSS/JS + cache resize ảnh của Grav (auto sinh lại khi
         // chạy) — khác với system/assets/ hay assets/ bên trong theme, những cái đó KHÔNG bị loại vì đây
         // chỉ khớp đúng cấp gốc.
