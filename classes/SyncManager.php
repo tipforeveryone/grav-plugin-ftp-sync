@@ -304,6 +304,155 @@ class SyncManager
 
 
     /**
+     * Bước 1/2 của "Push from Local": chỉ quét LOCAL (như startCheckDiffJob),
+     * nhưng lọc NGAY TẠI ĐÂY theo mtime > $sinceMtime — trước khi biết gì về
+     * remote. Mục đích: thay vì quét đệ quy TOÀN BỘ remote rồi so hết mọi
+     * path như "Check differences", chỉ hỏi FTP về ĐÚNG những file local vừa
+     * lọc được (xem stepPushFromLocalJob(), dùng statRemote() cho từng file
+     * thay vì FtpClient::scan() đệ quy cả thư mục), giảm hẳn số round-trip
+     * FTP khi chỉ có vài file vừa sửa trong 1 cây thư mục lớn.
+     *
+     * File chỉ tồn tại trên remote (chưa từng có ở local) KHÔNG BAO GIỜ xuất
+     * hiện trong kết quả — tính năng này chỉ quan tâm "đẩy cái gì từ local
+     * lên", không phát hiện "cái gì hosting có mà local thiếu".
+     *
+     * @param string[] $kinds Giống startCheckDiffJob().
+     * @param int $sinceMtime Unix timestamp — chỉ giữ file local có mtime > mốc này.
+     * @return array{job_id:string, total:int, label:string}
+     */
+    public function startPushFromLocalJob(array $kinds, int $sinceMtime): array
+    {
+        $groups = $this->resolveGroups($kinds);
+        if (empty($groups)) {
+            throw new \RuntimeException('No content selected to sync.');
+        }
+
+        $scanner = new FileScanner($this->ignorePatterns());
+
+        $local = [];
+        $files = [];
+        foreach ($groups as $groupKey => $group) {
+            foreach ($scanner->scan($group['local']) as $relPath => $stat) {
+                if ($stat['mtime'] <= $sinceMtime) {
+                    continue;
+                }
+                $path = $groupKey . '/' . $relPath;
+                $local[$path] = $stat;
+                $files[$path] = [
+                    'local' => rtrim($group['local'], '/') . '/' . $relPath,
+                    'remote' => rtrim($group['remote'], '/') . '/' . $relPath,
+                ];
+            }
+        }
+
+        $jobId = bin2hex(random_bytes(8));
+        $job = [
+            'id' => $jobId,
+            'groups' => $groups,
+            'local' => $local,
+            'remote' => [],
+            'files' => $files,
+            'paths' => array_keys($local),
+            'compare_total' => count($local),
+            'compare_done' => 0,
+            'rows' => [],
+            'baseline' => $this->loadBaseline(),
+        ];
+        $this->saveJson($this->dataDir . '/push-local-job.json', $job);
+
+        return ['job_id' => $jobId, 'total' => $job['compare_total'], 'label' => 'Comparing'];
+    }
+
+    /**
+     * Bước 2/2 của "Push from Local": với mỗi path còn lại trong batch, hỏi
+     * FTP TRỰC TIẾP (exists/mdtm/size cho đúng 1 file qua statRemote(), KHÔNG
+     * quét đệ quy cả thư mục remote như stepCheckDiffScan()) rồi diff ngay.
+     * Gọi lặp lại tới khi finished=true; khi xong, ghi kết quả vào
+     * last-diff.json giống hệt "Check differences" để nút "Sync now" hiện
+     * có tái sử dụng được nguyên vẹn (không cần sửa gì ở luồng sync).
+     *
+     * @return array{done:int,total:int,finished:bool,label:string,groups?:array<string,string>,rows?:array<string,array{type:string}>}
+     */
+    public function stepPushFromLocalJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
+    {
+        $job = $this->loadJson($this->dataDir . '/push-local-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such push job (it may have finished, been cancelled, or expired).');
+        }
+
+        $files = $job['files'];
+        $rows = $job['rows'];
+        $remote = $job['remote'];
+
+        $batchPaths = array_splice($job['paths'], 0, $batchSize);
+
+        if (!empty($batchPaths)) {
+            $ftp = new FtpClient();
+            $this->connectFtp($ftp);
+            try {
+                $localBatch = [];
+                $remoteBatch = [];
+                foreach ($batchPaths as $path) {
+                    $localBatch[$path] = $job['local'][$path];
+                    $stat = $this->statRemote($ftp, $files[$path]['remote']);
+                    if ($stat !== null) {
+                        $remoteBatch[$path] = $stat;
+                        $remote[$path] = $stat;
+                    }
+                }
+
+                $rows += (new DiffEngine())->diff($localBatch, $remoteBatch, function (string $path) use ($files, $ftp): bool {
+                    return $this->sameSizeContentDiffers($files[$path]['local'], $files[$path]['remote'], $ftp);
+                });
+            } finally {
+                $ftp->close();
+            }
+
+            $job['compare_done'] += count($batchPaths);
+        }
+
+        $job['rows'] = $rows;
+        $job['remote'] = $remote;
+        $finished = empty($job['paths']);
+
+        if ($finished) {
+            $state = [
+                'groups' => $job['groups'],
+                'local' => $job['local'],
+                'remote' => $remote,
+                'baseline' => $job['baseline'],
+                'rows' => $rows,
+                'checked_at' => time(),
+            ];
+            $this->saveJson($this->dataDir . '/last-diff.json', $state);
+            @unlink($this->dataDir . '/push-local-job.json');
+
+            $groupLabels = [];
+            foreach ($job['groups'] as $key => $group) {
+                $groupLabels[$key] = $group['label'];
+            }
+
+            return [
+                'done' => $job['compare_done'],
+                'total' => $job['compare_total'],
+                'finished' => true,
+                'label' => 'Comparing',
+                'groups' => $groupLabels,
+                'rows' => $rows,
+            ];
+        }
+
+        $this->saveJson($this->dataDir . '/push-local-job.json', $job);
+
+        return [
+            'done' => $job['compare_done'],
+            'total' => $job['compare_total'],
+            'finished' => false,
+            'label' => 'Comparing',
+        ];
+    }
+
+    /**
      * Bước 1/2 của "Full deploy to hosting": BỎ QUA hoàn toàn checkbox và
      * sync_plugins — tự quét TOÀN BỘ GRAV_ROOT, loại trừ đúng những gì
      * không ảnh hưởng tới việc site chạy được (xem FULL_DEPLOY_*_EXCLUDE).

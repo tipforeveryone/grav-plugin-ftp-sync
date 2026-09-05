@@ -264,6 +264,44 @@
             height: 2.2rem;
             line-height: 2.2rem;
         }
+
+        #ftp-sync-app .sc-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        #ftp-sync-app .sc-modal-box {
+            background: #fff;
+            border-radius: 6px;
+            padding: 1.5rem;
+            width: 24rem;
+            max-width: 90vw;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
+        #ftp-sync-app .sc-modal-box h3 { margin-top: 0; }
+        #ftp-sync-app .sc-modal-box p { color: #555; font-size: 0.9rem; }
+        #ftp-sync-app .sc-modal-field {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            margin: 1rem 0;
+            font-weight: 600;
+        }
+        #ftp-sync-app .sc-modal-field input {
+            padding: 0.4rem 0.6rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-weight: normal;
+        }
+        #ftp-sync-app .sc-modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.6rem;
+        }
     </style>
 
     {% set sync_enabled = ftp_sync_is_enabled() %}
@@ -314,6 +352,10 @@
         <div class="sc-top-right">
             <div class="sc-toolbar">
                 <button type="button" class="button" id="sc-check-diff" {{ sync_enabled ? '' : 'disabled' }}><i class="fa fa-refresh"></i> Check differences</button>
+                <button type="button" class="button" id="sc-push-local" {{ sync_enabled ? '' : 'disabled' }}
+                        title="Chỉ quét các file LOCAL có mtime sau 1 mốc thời gian bạn chọn, rồi so sánh đúng các file đó với Hosting — nhanh hơn 'Check differences' khi chỉ vừa sửa vài file trong 1 cây thư mục lớn.">
+                    <i class="fa fa-upload"></i> Push from Local
+                </button>
                 <button type="button" class="button primary" id="sc-sync-now" disabled>
                     <i class="fa fa-cloud-upload"></i> Sync now
                 </button>
@@ -328,6 +370,24 @@
                 <button type="button" class="button" id="sc-show-backups" {{ sync_enabled ? '' : 'disabled' }}>
                     <i class="fa fa-archive"></i> Show backups
                 </button>
+                <a class="button" href="{{ admin_route('/plugins/ftp-sync') }}">
+                    <i class="fa fa-cog"></i> Plugin Settings
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div id="sc-push-local-modal" class="sc-modal-overlay" style="display:none">
+        <div class="sc-modal-box">
+            <h3><i class="fa fa-upload"></i> Push from Local</h3>
+            <p>Chỉ quét các file local (theo Category đã tick ở trên) có <b>mtime sau</b> mốc thời gian dưới đây, rồi so sánh đúng các file đó với Hosting. File chưa từng có trên Hosting sẽ hiện là "Missing on Hosting".</p>
+            <label class="sc-modal-field">
+                Mốc thời gian (chỉ lấy file sửa SAU mốc này):
+                <input type="datetime-local" id="sc-push-local-since">
+            </label>
+            <div class="sc-modal-actions">
+                <button type="button" class="button" id="sc-push-local-cancel">Cancel</button>
+                <button type="button" class="button primary" id="sc-push-local-run">Run</button>
             </div>
         </div>
     </div>
@@ -435,6 +495,11 @@
     var isLocal = app.dataset.isLocal === '1';
 
     var checkBtn = document.getElementById('sc-check-diff');
+    var pushLocalBtn = document.getElementById('sc-push-local');
+    var pushLocalModal = document.getElementById('sc-push-local-modal');
+    var pushLocalSinceInput = document.getElementById('sc-push-local-since');
+    var pushLocalCancelBtn = document.getElementById('sc-push-local-cancel');
+    var pushLocalRunBtn = document.getElementById('sc-push-local-run');
     var syncBtn = document.getElementById('sc-sync-now');
     var fullDeployBtn = document.getElementById('sc-full-deploy');
     var fullDeployMarkBtn = document.getElementById('sc-full-deploy-mark-synced');
@@ -494,7 +559,8 @@
         changed: ''
     };
 
-    function defaultResolution(row) {
+    function defaultResolution(row, forceResolution) {
+        if (forceResolution) { return forceResolution; }
         if (row.type === 'changed') {
             if (row.newer === 'local') { return 'local'; }
             if (row.newer === 'remote') { return 'remote'; }
@@ -578,7 +644,7 @@
         }
     }
 
-    function buildResolutionSelect(path, row) {
+    function buildResolutionSelect(path, row, forceResolution) {
         var select = document.createElement('select');
         select.dataset.path = path;
         select.className = 'sc-resolution';
@@ -588,18 +654,19 @@
             o.textContent = opt[1];
             select.appendChild(o);
         });
-        select.value = defaultResolution(row);
+        select.value = defaultResolution(row, forceResolution);
         return select;
     }
 
-    function renderRows(rows) {
+    function renderRows(rows, options) {
+        options = options || {};
         lastRows = rows || {};
         tbody.innerHTML = '';
         var paths = Object.keys(lastRows);
 
         if (paths.length === 0) {
             results.style.display = 'none';
-            setStatus('No differences — local and hosting are in sync.', false);
+            setStatus(options.emptyMessage || 'No differences — local and hosting are in sync.', false);
             return;
         }
 
@@ -639,7 +706,7 @@
 
             var tdAction = document.createElement('td');
             tdAction.className = 'sc-col-action';
-            tdAction.appendChild(buildResolutionSelect(path, lastRows[path]));
+            tdAction.appendChild(buildResolutionSelect(path, lastRows[path], options.forceResolution));
             tr.appendChild(tdAction);
 
             tbody.appendChild(tr);
@@ -729,6 +796,93 @@
         }).catch(function (e) {
             setStatus('Error: ' + e, true);
             checkBtn.disabled = false;
+        });
+    });
+
+    /** Định dạng 1 Date thành chuỗi phù hợp cho <input type="datetime-local"> (giờ LOCAL của trình duyệt, không phải UTC). */
+    function toDatetimeLocalValue(date) {
+        function pad(n) { return n < 10 ? '0' + n : '' + n; }
+        return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) +
+            'T' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+    }
+
+    /** Mặc định mở modal "Push from Local" với mốc = 1 ngày trước thời điểm hiện tại. */
+    function defaultPushLocalSince() {
+        return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
+    }
+
+    /**
+     * "Push from Local": hỏi mốc mtime qua modal, rồi CHỈ quét local (lọc
+     * theo mtime ngay tại server) và so đúng các file đó với Hosting —
+     * dùng chung bảng kết quả + nút "Sync now" hiện có, nhưng ép sẵn mọi
+     * dòng về "Use Local version" (đây là tính năng đẩy local lên, không
+     * cần người dùng tự chọn hướng cho từng dòng).
+     */
+    pushLocalBtn.addEventListener('click', function () {
+        var kinds = selectedKinds();
+        if (kinds.length === 0) {
+            setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) to check.', true);
+            return;
+        }
+        pushLocalSinceInput.value = defaultPushLocalSince();
+        pushLocalModal.style.display = 'flex';
+        pushLocalSinceInput.focus();
+    });
+
+    pushLocalCancelBtn.addEventListener('click', function () {
+        pushLocalModal.style.display = 'none';
+    });
+
+    pushLocalModal.addEventListener('click', function (e) {
+        if (e.target === pushLocalModal) {
+            pushLocalModal.style.display = 'none';
+        }
+    });
+
+    pushLocalRunBtn.addEventListener('click', function () {
+        if (!pushLocalSinceInput.value) {
+            alert('Chọn mốc thời gian trước.');
+            return;
+        }
+
+        var sinceMtime = Math.floor(new Date(pushLocalSinceInput.value).getTime() / 1000);
+        var kinds = selectedKinds();
+        pushLocalModal.style.display = 'none';
+
+        setStatus('Checking (Push from Local)...', false);
+        checkBtn.disabled = true;
+        pushLocalBtn.disabled = true;
+        syncBtn.disabled = true;
+
+        var fields = kinds.map(function (kind) { return ['kinds[]', kind]; });
+        fields.push(['since_mtime', String(sinceMtime)]);
+
+        post('ftpsyncpushlocalstart', fields).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                checkBtn.disabled = false;
+                pushLocalBtn.disabled = false;
+                return;
+            }
+
+            showProgress(0, data.total, data.label || 'Comparing');
+            runBatchedJob('ftpsyncpushlocalstep', data.job_id, 'Comparing', function (finalData) {
+                checkBtn.disabled = false;
+                pushLocalBtn.disabled = false;
+                renderRows(finalData.rows || {}, {
+                    forceResolution: 'local',
+                    emptyMessage: 'No local files modified after the selected time.'
+                });
+                syncBtn.disabled = !isLocal || Object.keys(finalData.rows || {}).length === 0;
+            }, function (message) {
+                setStatus('Error: ' + message, true);
+                checkBtn.disabled = false;
+                pushLocalBtn.disabled = false;
+            });
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+            checkBtn.disabled = false;
+            pushLocalBtn.disabled = false;
         });
     });
 

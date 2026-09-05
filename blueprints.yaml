@@ -1,5 +1,5 @@
 name: "[TIP] - FTP Sync"
-version: 0.1.0
+version: 0.2.0
 description: Sync user/pages and the active theme between local and hosting over FTP/FTPS, with conflict detection and automatic backup before overwriting.
 icon: exchange
 author:
@@ -56,12 +56,12 @@ form:
         required: true
 
     sync_plugins:
-      type: text
+      type: checkboxes
       label: Plugins to sync
-      help: 'Comma-separated list of plugin names (in user/plugins/) to sync, e.g. admin-quick-menu,in-place-edit-button,ftp-sync. Leave EMPTY to sync every plugin under user/plugins/ instead of a specific list. (Themes are auto-detected from the site''s active theme — no need to declare them here, this field does not apply to themes.)'
-      default: ''
-      validate:
-        type: commalist
+      help: 'Chọn các plugin (trong user/plugins/) muốn đồng bộ. Bỏ trống = đồng bộ TẤT CẢ plugin trong user/plugins/. (Theme được tự động lấy theo theme đang active của site — không khai báo ở đây, field này không áp dụng cho theme.)'
+      data-options@: '\Grav\Plugin\FTPSyncPlugin::getPluginOptions'
+      wrapper_classes: fts-plugins-grid
+      use: keys
 
     ignore_patterns:
       type: text

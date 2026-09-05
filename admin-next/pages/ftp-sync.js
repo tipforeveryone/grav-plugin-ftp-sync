@@ -11,6 +11,11 @@
 
 const TAG = window.__GRAV_PAGE_TAG;
 const API_BASE = (window.__GRAV_API_SERVER_URL || '') + (window.__GRAV_API_PREFIX || '/api/v1');
+// Admin2 SPA base path (e.g. '/admin2') — same convention as easy-content-manager's
+// admin-next page, used to build a plain link to this plugin's generic
+// "/plugins/{slug}" config/settings page (host/username/password/sync_plugins...),
+// a completely different route from this custom operations page ('/plugin/ftp-sync').
+const APP_BASE = window.__GRAV_CONFIG__?.basePath || '/admin2';
 // Fallback only: window.__GRAV_API_TOKEN is a one-time snapshot taken when
 // admin2 first imports this page component (see the SvelteKit host's
 // PluginPage loader) and is never refreshed afterwards, even though the host
@@ -73,7 +78,8 @@ const RESOLUTION_OPTIONS = [
     ['delete_remote', 'Delete on Hosting'],
 ];
 
-function defaultResolution(row) {
+function defaultResolution(row, forceResolution) {
+    if (forceResolution) return forceResolution;
     if (row.type === 'changed') {
         if (row.newer === 'local') return 'local';
         if (row.newer === 'remote') return 'remote';
@@ -126,6 +132,17 @@ function formatSize(bytes) {
     if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return bytes + ' B';
+}
+
+/** Formats a Date as a value <input type="datetime-local"> accepts, in the browser's local time (not UTC). */
+function toDatetimeLocalValue(date) {
+    const pad = (n) => (n < 10 ? '0' + n : '' + n);
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** Default the "Push from Local" modal to 1 day before the current time. */
+function defaultPushLocalSince() {
+    return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
 }
 
 function formatDate(unixTime) {
@@ -203,10 +220,27 @@ class FtpSyncPage extends HTMLElement {
                 </div>
                 <div class="fts-toolbar">
                     <button type="button" class="fts-btn" data-action="check-diff" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-refresh"></i> Check differences</button>
+                    <button type="button" class="fts-btn" data-action="push-local" ${this._isEnabled ? '' : 'disabled'} title="Only scans LOCAL files with mtime after a chosen point in time, then compares just those against Hosting — faster than 'Check differences' when only a few files changed in a large tree."><i class="fa fa-upload"></i> Push from Local</button>
                     <button type="button" class="fts-btn fts-btn-primary" data-action="sync-now" disabled><i class="fa fa-cloud-upload"></i> Sync now</button>
                     <button type="button" class="fts-btn" data-action="full-deploy" ${this._isEnabled && this._isLocal ? '' : 'disabled'} title="Bundles the ENTIRE site into one .zip. Deleting old files on hosting and uploading is up to you."><i class="fa fa-rocket"></i> Compress full site</button>
                     <button type="button" class="fts-btn" data-action="mark-synced" style="display:none" ${this._isLocal ? '' : 'disabled'} title="Click ONLY after you have manually uploaded and extracted this zip on Hosting."><i class="fa fa-check"></i> Mark as deployed</button>
                     <button type="button" class="fts-btn" data-action="show-backups" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-archive"></i> Show backups</button>
+                    <a class="fts-btn" href="${this._escape(APP_BASE)}/plugins/ftp-sync"><i class="fa fa-cog"></i> Plugin Settings</a>
+                </div>
+            </div>
+
+            <div class="fts-modal-overlay" data-modal="push-local" style="display:none">
+                <div class="fts-modal-box">
+                    <h3><i class="fa fa-upload"></i> Push from Local</h3>
+                    <p>Only scans local files (within the Category selection above) with <b>mtime after</b> the point in time below, then compares just those files against Hosting. A file not yet on Hosting will show as "Missing on Hosting".</p>
+                    <label class="fts-modal-field">
+                        Since (only files modified AFTER this):
+                        <input type="datetime-local" class="fts-push-local-since">
+                    </label>
+                    <div class="fts-modal-actions">
+                        <button type="button" class="fts-btn" data-action="push-local-cancel">Cancel</button>
+                        <button type="button" class="fts-btn fts-btn-primary" data-action="push-local-run">Run</button>
+                    </div>
                 </div>
             </div>
 
@@ -286,6 +320,12 @@ class FtpSyncPage extends HTMLElement {
 
     _bindEvents() {
         this._q('[data-action="check-diff"]')?.addEventListener('click', () => this._runCheckDiff());
+        this._q('[data-action="push-local"]')?.addEventListener('click', () => this._openPushLocalModal());
+        this._q('[data-action="push-local-cancel"]')?.addEventListener('click', () => this._closePushLocalModal());
+        this._q('[data-action="push-local-run"]')?.addEventListener('click', () => this._runPushFromLocal());
+        this._q('[data-modal="push-local"]')?.addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) this._closePushLocalModal();
+        });
         this._q('[data-action="sync-now"]')?.addEventListener('click', () => this._runSync());
         this._q('[data-action="full-deploy"]')?.addEventListener('click', () => this._runFullDeploy());
         this._q('[data-action="mark-synced"]')?.addEventListener('click', () => this._runMarkSynced());
@@ -397,7 +437,80 @@ class FtpSyncPage extends HTMLElement {
         }
     }
 
-    _renderRows(rows) {
+    _openPushLocalModal() {
+        const kinds = this._selectedKinds();
+        if (kinds.length === 0) {
+            this._setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) to check.', true);
+            return;
+        }
+        const input = this._q('.fts-push-local-since');
+        input.value = defaultPushLocalSince();
+        this._q('[data-modal="push-local"]').style.display = 'flex';
+        input.focus();
+    }
+
+    _closePushLocalModal() {
+        this._q('[data-modal="push-local"]').style.display = 'none';
+    }
+
+    /**
+     * "Push from Local": scans only local (filtered by mtime server-side),
+     * compares just those files against Hosting, then reuses the existing
+     * results table + "Sync now" — but every row is forced to "Use Local
+     * version" since this feature is specifically about pushing local
+     * changes up, not resolving conflicts row by row.
+     */
+    async _runPushFromLocal() {
+        const input = this._q('.fts-push-local-since');
+        if (!input.value) {
+            this._setStatus('Choose a point in time first.', true);
+            return;
+        }
+
+        const sinceMtime = Math.floor(new Date(input.value).getTime() / 1000);
+        const kinds = this._selectedKinds();
+        this._closePushLocalModal();
+
+        const checkBtn = this._q('[data-action="check-diff"]');
+        const pushLocalBtn = this._q('[data-action="push-local"]');
+        const syncBtn = this._q('[data-action="sync-now"]');
+        this._setStatus('Checking (Push from Local)...', false);
+        checkBtn.disabled = true;
+        pushLocalBtn.disabled = true;
+        syncBtn.disabled = true;
+
+        try {
+            const data = await this._fetch('/ftp-sync/push-local', {
+                method: 'POST',
+                body: JSON.stringify({ kinds, since_mtime: sinceMtime }),
+            });
+            this._showProgress(0, data.total, data.label || 'Comparing');
+            await this._runBatchedJob(
+                () => this._fetch(`/ftp-sync/push-local/${data.job_id}/step`, { method: 'POST', body: '{}' }),
+                'Comparing',
+                (finalData) => {
+                    checkBtn.disabled = false;
+                    pushLocalBtn.disabled = false;
+                    this._renderRows(finalData.rows || {}, {
+                        forceResolution: 'local',
+                        emptyMessage: 'No local files modified after the selected time.',
+                    });
+                    syncBtn.disabled = !this._isLocal || Object.keys(finalData.rows || {}).length === 0;
+                },
+                (message) => {
+                    this._setStatus('Error: ' + message, true);
+                    checkBtn.disabled = false;
+                    pushLocalBtn.disabled = false;
+                },
+            );
+        } catch (err) {
+            this._setStatus('Error: ' + err.message, true);
+            checkBtn.disabled = false;
+            pushLocalBtn.disabled = false;
+        }
+    }
+
+    _renderRows(rows, opts = {}) {
         this._lastRows = rows || {};
         const tbody = this._q('.fts-diff-table tbody');
         const results = this._q('.fts-results');
@@ -406,14 +519,14 @@ class FtpSyncPage extends HTMLElement {
 
         if (paths.length === 0) {
             results.style.display = 'none';
-            this._setStatus('No differences — local and hosting are in sync.', false);
+            this._setStatus(opts.emptyMessage || 'No differences — local and hosting are in sync.', false);
             return;
         }
 
         tbody.innerHTML = paths.map((path) => {
             const row = this._lastRows[path];
             const cells = statusCells(row);
-            const options = RESOLUTION_OPTIONS.map(([v, l]) => `<option value="${v}" ${defaultResolution(row) === v ? 'selected' : ''}>${l}</option>`).join('');
+            const options = RESOLUTION_OPTIONS.map(([v, l]) => `<option value="${v}" ${defaultResolution(row, opts.forceResolution) === v ? 'selected' : ''}>${l}</option>`).join('');
             return `
                 <tr data-path="${this._escape(path)}" data-kind="${kindOfPath(path)}" data-status-group="${statusGroup(row.type)}">
                     <td class="fts-col-checkbox"><input type="checkbox" class="fts-row-select"></td>
@@ -760,6 +873,7 @@ class FtpSyncPage extends HTMLElement {
                 .fts-kind-desc { color: var(--muted-foreground, #6b7280); font-size: 12px; }
                 .fts-toolbar { display: flex; flex-direction: column; gap: 6px; flex: 0 0 16rem; }
                 .fts-btn { border: 1px solid var(--border, #e5e7eb); background: var(--card, #fff); border-radius: 6px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; color: var(--foreground, #1f2937); }
+                a.fts-btn { display: inline-block; text-align: center; text-decoration: none; box-sizing: border-box; }
                 .fts-btn:hover:not(:disabled) { background: var(--accent, #f3f4f6); }
                 .fts-btn:disabled { opacity: 0.5; cursor: default; }
                 .fts-btn-primary { background: var(--primary, #3b82f6); color: var(--primary-foreground, #fff); border-color: var(--primary, #3b82f6); }
@@ -791,6 +905,13 @@ class FtpSyncPage extends HTMLElement {
                 .fts-hint { font-size: 12.5px; color: var(--muted-foreground, #6b7280); }
                 .fts-error { color: var(--destructive, #dc2626); }
                 code { background: var(--accent, #f3f4f6); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+                .fts-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+                .fts-modal-box { background: var(--card, #fff); color: var(--foreground, #1f2937); border-radius: 6px; padding: 20px; width: 22rem; max-width: 90vw; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
+                .fts-modal-box h3 { margin: 0 0 8px; }
+                .fts-modal-box p { color: var(--muted-foreground, #6b7280); font-size: 12.5px; }
+                .fts-modal-field { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; font-weight: 600; font-size: 12.5px; }
+                .fts-modal-field input { padding: 6px 8px; border: 1px solid var(--border, #e5e7eb); border-radius: 4px; font-weight: normal; background: var(--card, #fff); color: var(--foreground, #1f2937); }
+                .fts-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
             </style>
         `;
     }
