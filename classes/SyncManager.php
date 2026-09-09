@@ -769,6 +769,109 @@ class SyncManager
     }
 
     /**
+     * On-demand diff cho ĐÚNG 1 cặp thư mục (thường là 1 thư mục trang duy
+     * nhất) — không qua job/batch vì thường chỉ có vài file, không cần
+     * progress bar, và không đụng gì tới baseline.json (baseline chỉ dành
+     * cho "Check differences" toàn site). Dùng bởi tính năng "Check FTP
+     * Sync" theo từng dòng trong bảng content của plugin easy-content-manager.
+     *
+     * @return array<string, array{type:string, newer?:?string, local:?array{mtime:int,size:int}, remote:?array{mtime:int,size:int}}>
+     */
+    public function checkPathDiff(string $localDir, string $remoteDir): array
+    {
+        $scanner = new FileScanner($this->ignorePatterns());
+        $local = $scanner->scan($localDir);
+
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+        $remote = [];
+        try {
+            $remote = $ftp->scan($remoteDir, [$scanner, 'isIgnored']);
+
+            $rows = (new DiffEngine())->diff($local, $remote, function (string $relPath) use ($localDir, $remoteDir, $ftp): bool {
+                return $this->sameSizeContentDiffers($localDir . '/' . $relPath, $remoteDir . '/' . $relPath, $ftp);
+            });
+        } finally {
+            $ftp->close();
+        }
+
+        foreach ($rows as $relPath => &$row) {
+            $row['local'] = $local[$relPath] ?? null;
+            $row['remote'] = $remote[$relPath] ?? null;
+        }
+        unset($row);
+
+        return $rows;
+    }
+
+    /**
+     * Áp dụng resolution cho ĐÚNG 1 cặp thư mục (xem checkPathDiff()) — thực
+     * thi ngay, đồng bộ, không job/batch. Cùng vocabulary với startSyncJob():
+     * 'local'=>push, 'remote'=>pull, 'delete_local', 'delete_remote' (giá trị
+     * khác/thiếu = bỏ qua). Có backup trước khi ghi đè/xoá, giống hệt
+     * stepSyncJob(), nhưng KHÔNG cập nhật baseline.json — tính năng này
+     * không liên quan tới baseline của "Check differences" toàn site.
+     *
+     * @param array<string,string> $resolutions relPath => local|remote|delete_local|delete_remote
+     * @return array{applied:int, skipped:int, errors: array<string,string>, backup: ?string}
+     */
+    public function applyPathResolutions(string $localDir, string $remoteDir, array $resolutions): array
+    {
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+
+        $backup = ($this->config['backup_enabled'] ?? true) ? new BackupManager($this->dataDir . '/backups') : null;
+
+        $applied = 0;
+        $skipped = 0;
+        $errors = [];
+
+        try {
+            foreach ($resolutions as $relPath => $resolution) {
+                $action = $this->resolveAction(is_string($resolution) ? $resolution : null);
+                if ($action === null) {
+                    $skipped++;
+                    continue;
+                }
+
+                $localFile = rtrim($localDir, '/') . '/' . $relPath;
+                $remoteFile = rtrim($remoteDir, '/') . '/' . $relPath;
+
+                try {
+                    if ($action === 'push') {
+                        $this->backupRemote($backup, $ftp, $relPath, $remoteFile);
+                        $ftp->upload($localFile, $remoteFile);
+                    } elseif ($action === 'pull') {
+                        $backup?->addLocalFile($relPath, $localFile);
+                        $ftp->download($remoteFile, $localFile);
+                    } elseif ($action === 'delete_remote') {
+                        $this->backupRemote($backup, $ftp, $relPath, $remoteFile);
+                        $ftp->delete($remoteFile);
+                    } elseif ($action === 'delete_local') {
+                        $backup?->addLocalFile($relPath, $localFile);
+                        @unlink($localFile);
+                    }
+                    $applied++;
+                } catch (\Throwable $e) {
+                    $skipped++;
+                    $errors[$relPath] = $e->getMessage();
+                }
+            }
+        } finally {
+            $ftp->close();
+        }
+
+        $backupResult = $backup?->finish();
+
+        return [
+            'applied' => $applied,
+            'skipped' => $skipped,
+            'errors' => $errors,
+            'backup' => $backupResult ? basename($backupResult) : null,
+        ];
+    }
+
+    /**
      * Mở BackupManager cho 1 batch của job: nếu job đã có backup_zip từ
      * batch trước (nghĩa là đã thực sự có entry, file zip chắc chắn tồn
      * tại) thì mở lại để nối thêm; nếu chưa, tạo mới. KHÔNG được lưu
@@ -1105,14 +1208,31 @@ class SyncManager
         return $names;
     }
 
-    /** Đọc 1 field config dạng list (mảng hoặc chuỗi phân tách dấu phẩy), trim + bỏ rỗng. */
+    /**
+     * Đọc 1 field config dạng list, hỗ trợ CẢ 2 shape Grav có thể lưu:
+     * - commalist (VD ignore_patterns): mảng phẳng các chuỗi giá trị.
+     * - checkboxes + "use: keys" (VD sync_plugins): map {optionKey =>
+     *   true/false} cho MỌI option chứ KHÔNG PHẢI mảng phẳng tên đã chọn —
+     *   xem comment tương tự ở SimpleMultiLanguageSitePlugin::multilang_templates
+     *   (cùng field type). Trước đây hàm này chỉ xử lý shape đầu, khiến
+     *   sync_plugins (sau khi đổi sang checkboxes) đọc nhầm value (true/false
+     *   -> "1") thay vì key (tên plugin) — gộp toàn bộ plugin đã chọn thành
+     *   1 group rác "plugin:1" trỏ tới thư mục không tồn tại, "Check
+     *   differences" vì vậy luôn báo im lặng "không có gì khác biệt".
+     */
     private function configList(string $key): array
     {
         $raw = $this->config[$key] ?? [];
         $raw = is_array($raw) ? $raw : explode(',', (string) $raw);
 
         $list = [];
-        foreach ($raw as $item) {
+        foreach ($raw as $optionKey => $item) {
+            if (is_bool($item)) {
+                if ($item) {
+                    $list[] = trim((string) $optionKey);
+                }
+                continue;
+            }
             $item = trim((string) $item);
             if ($item !== '') {
                 $list[] = $item;
