@@ -105,11 +105,9 @@ class FtpSyncApiController extends AbstractApiController
         $this->guard($request);
 
         $body = $this->getRequestBody($request);
-        $kinds = array_values((array) ($body['kinds'] ?? []));
         $sinceMtime = (int) ($body['since_mtime'] ?? 0);
-        $collapseFolders = filter_var($body['collapse_folders'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
-        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->startCleanupHostingJob($kinds, $sinceMtime, $collapseFolders)));
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->startCleanupHostingJob($sinceMtime)));
     }
 
     public function stepCleanupHosting(ServerRequestInterface $request): ResponseInterface

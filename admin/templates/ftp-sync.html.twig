@@ -331,16 +331,6 @@
             justify-content: flex-end;
             gap: 0.6rem;
         }
-        #ftp-sync-app .sc-modal-checkbox {
-            display: flex;
-            align-items: flex-start;
-            gap: 0.5rem;
-            margin: 1rem 0;
-            font-weight: normal;
-            font-size: 0.85rem;
-            color: #555;
-        }
-        #ftp-sync-app .sc-modal-checkbox input { margin-top: 0.2rem; }
     </style>
 
     {% set sync_enabled = ftp_sync_is_enabled() %}
@@ -435,14 +425,10 @@
     <div id="sc-cleanup-hosting-modal" class="sc-modal-overlay" style="display:none">
         <div class="sc-modal-box">
             <h3><i class="fa fa-trash"></i> Cleanup Hosting</h3>
-            <p>Chỉ quét các file hosting (theo Category đã tick ở trên) có <b>mtime sau</b> mốc thời gian dưới đây, rồi liệt kê những file không còn tồn tại ở local. Mỗi dòng mặc định "Delete on Hosting".</p>
+            <p>Chỉ áp dụng cho <b>Pages</b> (Category đã tick ở trên không ảnh hưởng tới thao tác này). Quét các file hosting trong Pages có <b>mtime sau</b> mốc thời gian dưới đây, rồi liệt kê những file không còn tồn tại ở local.</p>
             <label class="sc-modal-field">
                 Mốc thời gian (chỉ lấy file hosting sửa SAU mốc này):
                 <input type="datetime-local" id="sc-cleanup-hosting-since">
-            </label>
-            <label class="sc-modal-checkbox">
-                <input type="checkbox" id="sc-cleanup-hosting-collapse">
-                Gộp theo folder: nếu cả 1 folder không còn tồn tại ở local <b>và không chứa thêm thư mục con nào khác có nội dung riêng</b> (VD 1 child page), xoá nguyên cả folder đó trên Hosting thay vì liệt kê từng file bên trong. Folder có chứa nội dung con khác sẽ luôn giữ nguyên dạng liệt kê từng file, không bao giờ bị gộp xoá. Vẫn là thao tác xoá mạnh hơn — kiểm tra kỹ danh sách trước khi Sync now.
             </label>
             <div class="sc-modal-actions">
                 <button type="button" class="button" id="sc-cleanup-hosting-cancel">Cancel</button>
@@ -553,7 +539,7 @@
         <ul id="sc-cleanup-summary-list"></ul>
         <div class="sc-results-actions">
             <button type="button" class="button primary" id="sc-cleanup-run">
-                <i class="fa fa-trash"></i> Clean up
+                <i class="fa fa-trash"></i> Clean up pages on hosting
             </button>
         </div>
     </div>
@@ -578,7 +564,6 @@
     var cleanupHostingBtn = document.getElementById('sc-cleanup-hosting');
     var cleanupHostingModal = document.getElementById('sc-cleanup-hosting-modal');
     var cleanupHostingSinceInput = document.getElementById('sc-cleanup-hosting-since');
-    var cleanupHostingCollapseInput = document.getElementById('sc-cleanup-hosting-collapse');
     var cleanupHostingCancelBtn = document.getElementById('sc-cleanup-hosting-cancel');
     var cleanupHostingRunBtn = document.getElementById('sc-cleanup-hosting-run');
     var syncBtn = document.getElementById('sc-sync-now');
@@ -631,7 +616,6 @@
     var TYPE_LABELS = {
         missing_remote: 'Missing on Hosting',
         missing_local: 'Missing on Local',
-        missing_local_dir: 'Missing on Local (whole folder)',
         changed: 'Different — size or mtime differ'
     };
 
@@ -642,17 +626,10 @@
     var DEFAULT_RESOLUTION_BY_TYPE = {
         missing_remote: 'local',
         missing_local: 'remote',
-        missing_local_dir: 'delete_remote_dir',
         changed: ''
     };
 
     function defaultResolution(row, forceResolution) {
-        // missing_local_dir chỉ do "Cleanup Hosting" sinh ra (không bao giờ
-        // đến từ Check differences/Push from Local) — LUÔN mặc định xoá cả
-        // folder, bỏ qua forceResolution='delete_remote' mà Cleanup Hosting
-        // truyền cho các dòng file thường, vì action đó không áp dụng được
-        // cho 1 dòng đại diện cả thư mục.
-        if (row.type === 'missing_local_dir') { return 'delete_remote_dir'; }
         if (forceResolution) { return forceResolution; }
         if (row.type === 'changed') {
             if (row.newer === 'local') { return 'local'; }
@@ -668,14 +645,6 @@
         ['remote', 'Use Hosting version'],
         ['delete_local', 'Delete on Local'],
         ['delete_remote', 'Delete on Hosting']
-    ];
-
-    // Dòng đại diện cả 1 folder mồ côi chỉ có ý nghĩa với 1 hành động duy
-    // nhất — không hiện "Use Local/Hosting version" hay "Delete on Local"
-    // (folder không tồn tại ở local nên các lựa chọn đó vô nghĩa).
-    var FOLDER_RESOLUTION_OPTIONS = [
-        ['', 'No action'],
-        ['delete_remote_dir', 'Delete folder on Hosting (recursive)']
     ];
 
     var lastRows = {};
@@ -726,7 +695,7 @@
     function statusGroup(type) {
         if (type === 'changed') { return 'changed'; }
         if (type === 'missing_remote') { return 'local_only'; }
-        if (type === 'missing_local' || type === 'missing_local_dir') { return 'host_only'; }
+        if (type === 'missing_local') { return 'host_only'; }
         return '';
     }
 
@@ -753,7 +722,6 @@
             case 'missing_remote':
                 return [xCell, empty];
             case 'missing_local':
-            case 'missing_local_dir':
                 return [empty, xCell];
             default:
                 return [empty, empty];
@@ -764,8 +732,7 @@
         var select = document.createElement('select');
         select.dataset.path = path;
         select.className = 'sc-resolution';
-        var options = row.type === 'missing_local_dir' ? FOLDER_RESOLUTION_OPTIONS : RESOLUTION_OPTIONS;
-        options.forEach(function (opt) {
+        RESOLUTION_OPTIONS.forEach(function (opt) {
             var o = document.createElement('option');
             o.value = opt[0];
             o.textContent = opt[1];
@@ -780,36 +747,31 @@
      * Push from Local), there is no per-row choice to make here — every
      * result found is always going to be deleted — so this skips the
      * filterable table/dropdowns entirely and just lists the paths, with a
-     * single "Clean up" button that deletes exactly that list.
+     * single "Clean up pages on hosting" button that deletes exactly that
+     * list. Stays visible/enabled even with zero items found — the automatic
+     * Pages garbage-folder cleanup pass runs unconditionally inside the sync
+     * step and must stay reachable even when there's nothing else to clean up.
      */
     function renderCleanupSummary(rows) {
         lastCleanupRows = rows || {};
         var paths = Object.keys(lastCleanupRows);
 
-        // Even with zero items found, still surface "Clean up" when Pages was
-        // part of this scan — see hasSyncableContent() for why: the automatic
-        // Pages garbage-folder cleanup pass runs unconditionally inside the
-        // sync step and must stay reachable even when there's nothing else
-        // to clean up.
-        var pagesInScope = lastKinds.indexOf('pages') !== -1;
-
         cleanupSummaryList.innerHTML = '';
 
         if (paths.length === 0) {
             cleanupSummaryList.style.display = 'none';
-            cleanupSummaryText.textContent = 'No leftover files or folders found on Hosting for the selected time.';
-            cleanupSummary.style.display = pagesInScope ? '' : 'none';
-            cleanupRunBtn.disabled = !isLocal || !pagesInScope;
-            setStatus('No leftover files or folders found on Hosting for the selected time.', false);
+            cleanupSummaryText.textContent = 'No leftover Pages files/folders found on Hosting for the selected time.';
+            cleanupSummary.style.display = '';
+            cleanupRunBtn.disabled = !isLocal;
+            setStatus('No leftover Pages files/folders found on Hosting for the selected time.', false);
             return;
         }
 
-        cleanupSummaryText.textContent = 'Found ' + paths.length + ' leftover file(s)/folder(s) on Hosting no longer present on Local:';
+        cleanupSummaryText.textContent = 'Found ' + paths.length + ' leftover Pages file(s) on Hosting no longer present on Local:';
         cleanupSummaryList.style.display = '';
         paths.sort().forEach(function (path) {
-            var row = lastCleanupRows[path];
             var li = document.createElement('li');
-            li.textContent = row.type === 'missing_local_dir' ? path + '/** (whole folder)' : path;
+            li.textContent = path;
             cleanupSummaryList.appendChild(li);
         });
         cleanupSummary.style.display = '';
@@ -864,7 +826,7 @@
             tr.appendChild(tdCheck);
 
             var tdPath = document.createElement('td');
-            tdPath.textContent = type === 'missing_local_dir' ? path + '/**' : path;
+            tdPath.textContent = path;
             tdPath.title = TYPE_LABELS[type] || type;
             tr.appendChild(tdPath);
 
@@ -1070,18 +1032,15 @@
     }
 
     /**
-     * "Cleanup Hosting": hỏi mốc mtime qua modal, rồi CHỈ quét hosting (lọc
+     * "Cleanup Hosting": luôn chỉ áp dụng cho Pages (Category tick ở trên
+     * không ảnh hưởng tới thao tác này — xem startCleanupHostingJob() trong
+     * SyncManager.php). Hỏi mốc mtime qua modal, rồi CHỈ quét hosting (lọc
      * theo mtime ngay tại server) và giữ lại đúng những file không còn tồn
      * tại ở local — dùng chung bảng kết quả + nút "Sync now" hiện có, nhưng
      * ép sẵn mọi dòng về "Delete on Hosting" (đây là tính năng dọn rác trên
      * hosting, không cần người dùng tự chọn hướng cho từng dòng).
      */
     cleanupHostingBtn.addEventListener('click', function () {
-        var kinds = selectedKinds();
-        if (kinds.length === 0) {
-            setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) to check.', true);
-            return;
-        }
         cleanupHostingSinceInput.value = defaultCleanupHostingSince();
         cleanupHostingModal.style.display = 'flex';
         cleanupHostingSinceInput.focus();
@@ -1104,8 +1063,7 @@
         }
 
         var sinceMtime = Math.floor(new Date(cleanupHostingSinceInput.value).getTime() / 1000);
-        var kinds = selectedKinds();
-        lastKinds = kinds;
+        lastKinds = ['pages'];
         cleanupHostingModal.style.display = 'none';
 
         setStatus('Checking (Cleanup Hosting)...', false);
@@ -1113,9 +1071,7 @@
         cleanupHostingBtn.disabled = true;
         results.style.display = 'none';
 
-        var fields = kinds.map(function (kind) { return ['kinds[]', kind]; });
-        fields.push(['since_mtime', String(sinceMtime)]);
-        fields.push(['collapse_folders', cleanupHostingCollapseInput.checked ? '1' : '0']);
+        var fields = [['since_mtime', String(sinceMtime)]];
 
         post('ftpsynccleanupstart', fields).then(function (data) {
             if (data.status !== 'success') {
@@ -1186,18 +1142,13 @@
 
     syncBtn.addEventListener('click', function () {
         var fields = [];
-        var folderDeletes = 0;
         tbody.querySelectorAll('select.sc-resolution').forEach(function (select) {
             if (select.value) {
                 fields.push(['resolutions[' + select.dataset.path + ']', select.value]);
-                if (select.value === 'delete_remote_dir') { folderDeletes++; }
             }
         });
 
-        var confirmMessage = folderDeletes > 0
-            ? 'Sync now? This will PERMANENTLY delete ' + folderDeletes + ' whole folder(s) on Hosting (all files inside included). A backup zip is still created first, but double-check the list before continuing.'
-            : 'Sync now? Files about to be overwritten will be backed up automatically first.';
-        if (!window.confirm(confirmMessage)) {
+        if (!window.confirm('Sync now? Files about to be overwritten will be backed up automatically first.')) {
             return;
         }
 
@@ -1246,31 +1197,22 @@
     });
 
     /**
-     * "Clean up": the Cleanup Hosting equivalent of the "Sync now" handler
-     * above, but with no per-row resolution to read from the DOM (there is
-     * none — the summary list has no dropdowns) — every listed item always
-     * resolves to its natural deletion action (delete_remote for files,
-     * delete_remote_dir for collapsed folders), reusing the exact same
+     * "Clean up pages on hosting": the Cleanup Hosting equivalent of the
+     * "Sync now" handler above, but with no per-row resolution to read from
+     * the DOM (there is none — the summary list has no dropdowns) — every
+     * listed item always resolves to 'delete_remote', reusing the exact same
      * ftpsyncsyncstart/step backend tasks as "Sync now".
      */
     cleanupRunBtn.addEventListener('click', function () {
         var fields = [];
-        var folderDeletes = 0;
         var paths = Object.keys(lastCleanupRows);
         paths.forEach(function (path) {
-            var resolution = lastCleanupRows[path].type === 'missing_local_dir' ? 'delete_remote_dir' : 'delete_remote';
-            fields.push(['resolutions[' + path + ']', resolution]);
-            if (resolution === 'delete_remote_dir') { folderDeletes++; }
+            fields.push(['resolutions[' + path + ']', 'delete_remote']);
         });
 
-        var confirmMessage;
-        if (paths.length === 0) {
-            confirmMessage = 'Nothing listed to delete, but this will still check Hosting for leftover empty/markdown-less Pages folders. Continue?';
-        } else if (folderDeletes > 0) {
-            confirmMessage = 'Clean up? This will PERMANENTLY delete ' + paths.length + ' item(s) on Hosting, including ' + folderDeletes + ' whole folder(s) (all files inside included). A backup zip is still created first, but double-check the list before continuing.';
-        } else {
-            confirmMessage = 'Clean up? This will PERMANENTLY delete ' + paths.length + ' item(s) on Hosting. A backup zip is still created first.';
-        }
+        var confirmMessage = paths.length === 0
+            ? 'Nothing listed to delete, but this will still check Hosting for leftover empty/markdown-less Pages folders. Continue?'
+            : 'Clean up pages on hosting? This will PERMANENTLY delete ' + paths.length + ' item(s) on Hosting. A backup zip is still created first.';
         if (!window.confirm(confirmMessage)) {
             return;
         }

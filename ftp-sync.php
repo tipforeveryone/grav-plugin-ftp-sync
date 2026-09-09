@@ -369,12 +369,10 @@ HTML;
             return;
         }
 
-        $kinds = array_values((array) ($post['kinds'] ?? []));
         $sinceMtime = (int) ($post['since_mtime'] ?? 0);
-        $collapseFolders = filter_var($post['collapse_folders'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
         try {
-            $result = $this->syncManager()->startCleanupHostingJob($kinds, $sinceMtime, $collapseFolders);
+            $result = $this->syncManager()->startCleanupHostingJob($sinceMtime);
             $this->grav['admin']->json_response = ['status' => 'success'] + $result;
         } catch (\Throwable $e) {
             $this->jsonError($e->getMessage());

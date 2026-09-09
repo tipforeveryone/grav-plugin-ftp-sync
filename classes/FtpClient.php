@@ -241,8 +241,8 @@ class FtpClient
     /**
      * Xoá đệ quy 1 thư mục remote, KỂ CẢ chính thư mục đó (khác deleteTree()
      * ở trên — cái đó chỉ dọn rỗng nội dung bên trong để tái dùng lại thư
-     * mục gốc). Dùng cho "Cleanup Hosting" khi người dùng chọn xoá nguyên
-     * cả 1 folder mồ côi (không còn tồn tại ở local) thay vì xoá từng file.
+     * mục gốc). Dùng bởi SyncManager::pruneMarkdownlessPagesDirs() (dọn rác
+     * tự động dưới user/pages sau mỗi lượt Sync).
      */
     public function removeDirRecursive(string $remoteDir): void
     {
