@@ -193,6 +193,64 @@ class FtpClient
     }
 
     /**
+     * Dọn đệ quy các thư mục con RỖNG HOÀN TOÀN (không còn file lẫn thư mục
+     * con nào bên trong, kể cả sau khi đã dọn đệ quy) nằm bên trong
+     * $remoteDir — nhưng KHÔNG BAO GIỜ xoá chính $remoteDir (giống quy ước
+     * của deleteTree(), để không lỡ xoá mất thư mục gốc của cả group, VD
+     * user/pages, dù nó rỗng hoàn toàn). Duyệt post-order (dọn thư mục con
+     * trước, rồi mới xét chính thư mục hiện tại có rỗng để báo lên cho thư
+     * mục cha hay không) — chỉ 1 lượt liệt kê (MLSD/NLIST) cho mỗi thư mục.
+     *
+     * Dùng sau khi xoá file lẻ trên hosting (VD "Cleanup Hosting" xoá từng
+     * file riêng vì folder chứa nội dung con khác nên không được gộp xoá cả
+     * cụm) — các thư mục cha có thể trở nên rỗng hẳn nhưng FTP delete() chỉ
+     * xoá file, không tự dọn thư mục rỗng còn sót lại.
+     *
+     * @return bool true nếu SAU KHI dọn xong, $remoteDir không còn entry nào (rỗng hoàn toàn).
+     */
+    public function pruneEmptyDirs(string $remoteDir): bool
+    {
+        $remoteDir = rtrim($remoteDir, '/');
+        $entries = @ftp_mlsd($this->conn, $remoteDir);
+        if ($entries === false) {
+            $entries = $this->fallbackList($remoteDir);
+        }
+
+        $hasContent = false;
+        foreach ($entries as $entry) {
+            $name = $entry['name'];
+            if ($name === '.' || $name === '..') {
+                continue;
+            }
+
+            if ($entry['type'] === 'dir') {
+                $path = $remoteDir . '/' . $name;
+                if ($this->pruneEmptyDirs($path)) {
+                    @ftp_rmdir($this->conn, $path);
+                } else {
+                    $hasContent = true;
+                }
+            } else {
+                $hasContent = true;
+            }
+        }
+
+        return !$hasContent;
+    }
+
+    /**
+     * Xoá đệ quy 1 thư mục remote, KỂ CẢ chính thư mục đó (khác deleteTree()
+     * ở trên — cái đó chỉ dọn rỗng nội dung bên trong để tái dùng lại thư
+     * mục gốc). Dùng cho "Cleanup Hosting" khi người dùng chọn xoá nguyên
+     * cả 1 folder mồ côi (không còn tồn tại ở local) thay vì xoá từng file.
+     */
+    public function removeDirRecursive(string $remoteDir): void
+    {
+        $this->deleteTree($remoteDir);
+        @ftp_rmdir($this->conn, rtrim($remoteDir, '/'));
+    }
+
+    /**
      * Tạo thư mục remote đệ quy, bỏ qua nếu đã tồn tại. Nếu 1 segment vừa
      * không chdir được vừa không mkdir được (quyền, quota, tên không hợp
      * lệ...), ném lỗi rõ ràng ngay tại đây thay vì để nó âm thầm trôi tới

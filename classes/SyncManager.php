@@ -453,6 +453,166 @@ class SyncManager
     }
 
     /**
+     * Bước 1/2 của "Cleanup Hosting": chuẩn bị hàng đợi group để quét REMOTE
+     * (giống pha 'scan' của "Check differences") — không quét local trước
+     * như "Push from Local" vì tính năng này đi NGƯỢC HƯỚNG: tìm file có
+     * trên HOSTING nhưng KHÔNG (còn) có ở local, để dọn rác trên hosting
+     * (file cũ còn sót lại sau khi đổi tên/xoá ở local mà chưa từng dọn).
+     * Không cần quét đệ quy local vì việc "có tồn tại ở local hay không"
+     * chỉ cần 1 lần file_exists() cho mỗi path tìm thấy trên remote — xem
+     * stepCleanupHostingJob().
+     *
+     * @param string[] $kinds Giống startCheckDiffJob().
+     * @param int $sinceMtime Unix timestamp — chỉ xét file HOSTING có mtime > mốc này
+     *                        (tránh phải liệt kê toàn bộ cây hosting mỗi lần, và tránh
+     *                        báo nhầm file vừa mới upload xong ở thao tác khác).
+     * @param bool $collapseFolders Nếu true, khi 1 file mồ côi nằm trong 1 thư mục mà
+     *                        CHÍNH THƯ MỤC ĐÓ cũng không còn tồn tại ở local (chứ không
+     *                        chỉ riêng file này) VÀ thư mục đó không chứa thêm thư mục
+     *                        con nào khác có nội dung (xem isFlatOrphanDir() — tức KHÔNG
+     *                        phải 1 cụm nhiều nội dung con lồng nhau, VD child page), gộp
+     *                        toàn bộ file con trong thư mục đó thành ĐÚNG 1 dòng kết quả
+     *                        kiểu 'missing_local_dir' — cho phép xoá nguyên cả folder trên
+     *                        hosting bằng 1 hành động thay vì liệt kê từng file bên trong.
+     *                        Nếu thư mục còn chứa thư mục con có nội dung riêng, KHÔNG gộp
+     *                        (rơi về liệt kê từng file như cũ) để tránh xoá nhầm nội dung
+     *                        không liên quan nằm chung cây thư mục. Mặc định false để giữ
+     *                        nguyên hành vi cũ (an toàn hơn — luôn liệt kê từng file riêng lẻ).
+     * @return array{job_id:string, total:int, label:string}
+     */
+    public function startCleanupHostingJob(array $kinds, int $sinceMtime, bool $collapseFolders = false): array
+    {
+        $groups = $this->resolveGroups($kinds);
+        if (empty($groups)) {
+            throw new \RuntimeException('No content selected to sync.');
+        }
+
+        $jobId = bin2hex(random_bytes(8));
+        $job = [
+            'id' => $jobId,
+            'groups' => $groups,
+            'scan_queue' => array_keys($groups),
+            'scan_total' => count($groups),
+            'scan_done' => 0,
+            'since_mtime' => $sinceMtime,
+            'collapse_folders' => $collapseFolders,
+            'remote' => [],
+            'rows' => [],
+            'baseline' => $this->loadBaseline(),
+        ];
+        $this->saveJson($this->dataDir . '/cleanup-hosting-job.json', $job);
+
+        return ['job_id' => $jobId, 'total' => $job['scan_total'], 'label' => 'Scanning'];
+    }
+
+    /**
+     * Bước 2/2 của "Cleanup Hosting": quét REMOTE đệ quy ĐÚNG 1 group còn
+     * lại trong scan_queue (network round-trip, giống stepCheckDiffScan()),
+     * giữ lại CHỈ những path thoả cả 2 điều kiện: mtime hosting > since_mtime
+     * VÀ không tồn tại ở local (file_exists() trực tiếp trên path tương ứng —
+     * không cần quét local vì chỉ cần biết có/không, không cần mtime/size
+     * local). Gọi lặp lại tới khi finished=true; khi xong, ghi kết quả vào
+     * last-diff.json (rows toàn 'missing_local') để nút "Sync now" tái dùng
+     * nguyên vẹn, UI sẽ tự forceResolution='delete_remote' cho mọi dòng.
+     *
+     * @return array{done:int,total:int,finished:bool,label:string,groups?:array<string,string>,rows?:array<string,array{type:string}>}
+     */
+    public function stepCleanupHostingJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
+    {
+        $job = $this->loadJson($this->dataDir . '/cleanup-hosting-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such cleanup job (it may have finished, been cancelled, or expired).');
+        }
+
+        $groupKey = array_shift($job['scan_queue']);
+        $group = $job['groups'][$groupKey];
+
+        $scanner = new FileScanner($this->ignorePatterns());
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+        try {
+            // Lấy TOÀN BỘ danh sách file remote của group này trước (scan() trả
+            // về mảng đầy đủ, không phải generator) — cần thiết để kiểm tra
+            // "flat" bên dưới (isFlatOrphanDir() phải biết CẢ những file khác
+            // nằm trong cùng thư mục ứng viên, kể cả file chưa được xét tới
+            // trong vòng lặp phía dưới).
+            $remoteFiles = $ftp->scan($group['remote'], [$scanner, 'isIgnored']);
+            $flatCache = [];
+
+            foreach ($remoteFiles as $relPath => $stat) {
+                if ($stat['mtime'] <= $job['since_mtime']) {
+                    continue;
+                }
+                if (file_exists(rtrim($group['local'], '/') . '/' . $relPath)) {
+                    continue;
+                }
+
+                if (!empty($job['collapse_folders'])) {
+                    $orphanDir = $this->topmostOrphanDir($group['local'], $relPath);
+                    if ($orphanDir !== null) {
+                        $flatCache[$orphanDir] ??= $this->isFlatOrphanDir($orphanDir, $remoteFiles);
+                        if ($flatCache[$orphanDir]) {
+                            $path = $groupKey . '/' . $orphanDir;
+                            $job['remote'][$path] = $job['remote'][$path] ?? ['mtime' => $stat['mtime'], 'size' => 0];
+                            $job['rows'][$path] = ['type' => 'missing_local_dir'];
+                            continue;
+                        }
+                        // $orphanDir chứa 1 (hay nhiều) thư mục con khác cũng có
+                        // nội dung riêng (VD child page) -> KHÔNG được gộp xoá cả
+                        // cụm, rơi xuống liệt kê từng file như bình thường để
+                        // tránh xoá nhầm nội dung không liên quan nằm chung cây.
+                    }
+                }
+
+                $path = $groupKey . '/' . $relPath;
+                $job['remote'][$path] = $stat;
+                $job['rows'][$path] = ['type' => 'missing_local'];
+            }
+        } finally {
+            $ftp->close();
+        }
+
+        $job['scan_done']++;
+        $finished = empty($job['scan_queue']);
+
+        if ($finished) {
+            $state = [
+                'groups' => $job['groups'],
+                'local' => [],
+                'remote' => $job['remote'],
+                'baseline' => $job['baseline'],
+                'rows' => $job['rows'],
+                'checked_at' => time(),
+            ];
+            $this->saveJson($this->dataDir . '/last-diff.json', $state);
+            @unlink($this->dataDir . '/cleanup-hosting-job.json');
+
+            $groupLabels = [];
+            foreach ($job['groups'] as $key => $group) {
+                $groupLabels[$key] = $group['label'];
+            }
+
+            return [
+                'done' => $job['scan_done'],
+                'total' => $job['scan_total'],
+                'finished' => true,
+                'label' => 'Scanning',
+                'groups' => $groupLabels,
+                'rows' => $job['rows'],
+            ];
+        }
+
+        $this->saveJson($this->dataDir . '/cleanup-hosting-job.json', $job);
+
+        return [
+            'done' => $job['scan_done'],
+            'total' => $job['scan_total'],
+            'finished' => false,
+            'label' => 'Scanning',
+        ];
+    }
+
+    /**
      * Bước 1/2 của "Full deploy to hosting": BỎ QUA hoàn toàn checkbox và
      * sync_plugins — tự quét TOÀN BỘ GRAV_ROOT, loại trừ đúng những gì
      * không ảnh hưởng tới việc site chạy được (xem FULL_DEPLOY_*_EXCLUDE).
@@ -665,10 +825,27 @@ class SyncManager
             'baseline' => $state['baseline'],
             'backup_zip' => null,
             'backup_has_entries' => false,
+            // Luôn dọn rác Pages ở batch cuối MIỄN LÀ Pages có mặt trong lượt
+            // check/cleanup gần nhất — KHÔNG phụ thuộc việc có ops nào thực sự
+            // xoá gì hay không, và KHÔNG bị lọc bởi mtime của "Cleanup
+            // Hosting" (mtime chỉ ảnh hưởng tới việc 1 file có được LIỆT KÊ
+            // thành dòng cho người dùng xem/chọn hay không, không ảnh hưởng
+            // tới bước dọn rác này — pruneMarkdownlessPagesDirs() luôn quét
+            // lại toàn bộ user/pages từ đầu). Trước đây gate bằng cờ
+            // 'pages_dirty' (chỉ bật khi có action xoá pages thực sự) khiến
+            // nhiều folder rác có mtime cũ hơn mốc đã chọn không bao giờ được
+            // dọn, vì "Cleanup Hosting" không liệt kê được file nào trong đó
+            // để tạo ra hành động xoá — nay bỏ hẳn phụ thuộc đó.
+            'pages_cleanup_pending' => isset($state['groups']['pages']),
+            'pages_cleanup_result' => null,
         ];
         $this->saveJson($this->dataDir . '/sync-job.json', $job);
 
-        return ['job_id' => $jobId, 'total' => $job['total']];
+        return [
+            'job_id' => $jobId,
+            'total' => $job['total'],
+            'has_pages_cleanup' => $job['pages_cleanup_pending'],
+        ];
     }
 
     /**
@@ -729,6 +906,14 @@ class SyncManager
                         $this->backupRemote($backup, $ftp, $relPath, $remoteFile);
                         $ftp->delete($remoteFile);
                         unset($baseline[$path]);
+                    } elseif ($action === 'delete_remote_dir') {
+                        $this->backupRemoteDir($backup, $ftp, $relPath, $remoteFile);
+                        $ftp->removeDirRecursive($remoteFile);
+                        foreach (array_keys($baseline) as $baselineKey) {
+                            if ($baselineKey === $path || str_starts_with($baselineKey, $path . '/')) {
+                                unset($baseline[$baselineKey]);
+                            }
+                        }
                     } elseif ($action === 'delete_local') {
                         $backup?->addLocalFile($path, $localFile);
                         @unlink($localFile);
@@ -740,6 +925,35 @@ class SyncManager
                     $job['skipped']++;
                     $job['errors'][$path] = $e->getMessage();
                 }
+            }
+
+            // Dọn "rác" dưới user/pages ngay TRONG batch cuối cùng, tái dùng
+            // $ftp đang mở sẵn. Chạy MIỄN LÀ Pages có mặt trong lượt check/
+            // cleanup gần nhất (job['groups']['pages']) — không cần biết có
+            // ops nào thực sự xoá gì hay không, và không bị ảnh hưởng bởi
+            // mtime của "Cleanup Hosting" (xem giải thích ở 'pages_cleanup_pending'
+            // trong startSyncJob()). 2 bước, theo đúng thứ tự:
+            // 1) pruneMarkdownlessPagesDirs(): thư mục không còn .md nào ở bất
+            //    kỳ đâu bên trong (dù vẫn còn sót ảnh/asset khác) không còn là
+            //    trang Grav hợp lệ nữa -> xoá nguyên cả cụm (có backup trước).
+            // 2) pruneEmptyDirs(): dọn thư mục rỗng TUYỆT ĐỐI (0 file) — chạy
+            //    SAU bước 1 vì xoá nguyên cụm ở bước 1 có thể khiến thư mục
+            //    cha của nó trở nên rỗng hẳn; đồng thời đây cũng là lưới an
+            //    toàn cho thư mục vốn đã rỗng từ trước (0 file thì bước 1
+            //    không thấy được, vì nó chỉ lần theo danh sách FILE để suy ra
+            //    thư mục cha nào có nội dung).
+            if (empty($job['ops']) && !empty($job['pages_cleanup_pending']) && isset($groups['pages'])) {
+                $deletedGarbageDirs = $this->pruneMarkdownlessPagesDirs($backup, $ftp, $groups['pages']['remote']);
+                foreach ($deletedGarbageDirs as $relDir) {
+                    $prefixedPath = 'pages/' . $relDir;
+                    foreach (array_keys($baseline) as $baselineKey) {
+                        if ($baselineKey === $prefixedPath || str_starts_with($baselineKey, $prefixedPath . '/')) {
+                            unset($baseline[$baselineKey]);
+                        }
+                    }
+                }
+                $ftp->pruneEmptyDirs($groups['pages']['remote']);
+                $job['pages_cleanup_result'] = ['deleted_dirs' => count($deletedGarbageDirs)];
             }
         } finally {
             $ftp->close();
@@ -765,6 +979,7 @@ class SyncManager
             'errors' => $finished ? $job['errors'] : [],
             'finished' => $finished,
             'backup' => $backupResult ? basename($backupResult) : null,
+            'pages_cleanup' => $finished ? $job['pages_cleanup_result'] : null,
         ];
     }
 
@@ -1039,7 +1254,7 @@ class SyncManager
         return false;
     }
 
-    /** Map resolution người dùng chọn ('local'|'remote'|'delete_local'|'delete_remote') -> hành động. */
+    /** Map resolution người dùng chọn ('local'|'remote'|'delete_local'|'delete_remote'|'delete_remote_dir') -> hành động. */
     private function resolveAction(?string $resolution): ?string
     {
         return match ($resolution) {
@@ -1047,8 +1262,188 @@ class SyncManager
             'remote' => 'pull',
             'delete_local' => 'delete_local',
             'delete_remote' => 'delete_remote',
+            'delete_remote_dir' => 'delete_remote_dir',
             default => null,
         };
+    }
+
+    /**
+     * Dùng bởi "Cleanup Hosting" khi $collapseFolders bật: với 1 file mồ côi
+     * tại $relPath (đã biết không tồn tại ở local), đi ngược từ thư mục cha
+     * gần nhất lên tới group root, tìm thư mục CAO NHẤT (gần root nhất)
+     * không còn tồn tại ở local — nghĩa là cả thư mục đó (không riêng gì
+     * file này) đã bị xoá/đổi tên ở local. Trả về null nếu file nằm ngay
+     * trong group root (không có thư mục cha) hoặc mọi thư mục cha đều vẫn
+     * tồn tại ở local (chỉ riêng file này mất, không phải cả folder).
+     */
+    private function topmostOrphanDir(string $groupLocal, string $relPath): ?string
+    {
+        $parts = explode('/', $relPath);
+        array_pop($parts);
+        if (empty($parts)) {
+            return null;
+        }
+
+        $current = '';
+        foreach ($parts as $part) {
+            $current = $current === '' ? $part : $current . '/' . $part;
+            if (!is_dir(rtrim($groupLocal, '/') . '/' . $current)) {
+                return $current;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Chỉ cho phép gộp xoá cả 1 thư mục khi thư mục đó KHÔNG chứa thêm thư
+     * mục con nào khác có nội dung riêng (VD child page trong Grav, hay bất
+     * kỳ thư mục con nào chứa file) — nếu không, xoá cả cụm ($dir) sẽ xoá
+     * luôn những nội dung con đó, có thể không liên quan gì tới lý do
+     * $dir bị coi là "mồ côi" (VD 1 danh mục cha "03.blog" mất hẳn ở local
+     * kéo theo hàng chục bài viết con bị gộp xoá chung 1 thao tác — quá rộng
+     * và rủi ro). Kiểm tra bằng cách xét MỌI file remote đã quét được của cả
+     * group (không quét lại lần nữa) nằm trong $dir: nếu bất kỳ file nào có
+     * phần đường dẫn còn lại (sau khi bỏ tiền tố "$dir/") chứa thêm dấu '/'
+     * — tức nó nằm trong 1 thư mục con của $dir — thì $dir không "flat",
+     * trả về false.
+     *
+     * @param array<string,array{mtime:int,size:int}> $remoteFiles Toàn bộ map file remote
+     *        của group (relPath => stat), lấy từ FtpClient::scan() gọi 1 lần duy nhất.
+     */
+    private function isFlatOrphanDir(string $dir, array $remoteFiles): bool
+    {
+        $prefix = $dir . '/';
+        $prefixLen = strlen($prefix);
+
+        foreach ($remoteFiles as $relPath => $stat) {
+            if (strncmp($relPath, $prefix, $prefixLen) !== 0) {
+                continue;
+            }
+            if (str_contains(substr($relPath, $prefixLen), '/')) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Dọn "rác" trong user/pages trên hosting: bất kỳ thư mục nào KHÔNG CÒN
+     * chứa file .md ở bất kỳ độ sâu nào bên trong nó — dù vẫn còn sót file
+     * khác (ảnh, asset...) — không còn là 1 trang Grav hợp lệ nữa (Grav bắt
+     * buộc mỗi trang phải có tối thiểu 1 file .md), nên xoá LUÔN CẢ CỤM thư
+     * mục đó (kể cả file còn sót), có backup trước như mọi lượt xoá khác.
+     * Mạnh hơn pruneEmptyDirs() (không đòi hỏi thư mục phải rỗng tuyệt đối),
+     * nhưng KHÔNG thay thế được nó: 1 thư mục rỗng tuyệt đối (0 file) không
+     * để lại dấu vết gì trong danh sách file quét được nên hàm này không
+     * thấy được — vẫn cần gọi pruneEmptyDirs() sau đó (xem stepSyncJob()).
+     *
+     * Quét TOÀN BỘ user/pages 1 lần (relPath => stat), tách 2 tập hợp:
+     * - $pageDirs: thư mục CHỨA TRỰC TIẾP ít nhất 1 file .md (thư mục trang
+     *   thật). Chạm tới thư mục này khi đi từ gốc xuống nghĩa là mọi thứ bên
+     *   dưới nó (kể cả lồng sâu hơn, VD "images/" chứa ảnh) đều là tài sản
+     *   CỦA TRANG ĐÓ — phải dừng lại, coi là an toàn, không đi tiếp xuống
+     *   dưới. Thiếu bước dừng này sẽ xoá NHẦM thư mục ảnh hợp lệ của 1 trang
+     *   thật chỉ vì bản thân "images/" không tự chứa .md nào.
+     * - $ancestorsOfPageDirs: thư mục là tổ tiên (ở bất kỳ độ sâu nào) của 1
+     *   $pageDirs — nghĩa là bên trong nó (ở nhánh khác, sâu hơn) vẫn còn ít
+     *   nhất 1 trang thật, nên KHÔNG được xoá nguyên cả cụm (sẽ xoá nhầm
+     *   trang đó), phải đi tiếp xuống sâu hơn để tìm đúng nhánh rác cụ thể.
+     *
+     * Với mỗi file còn lại, đi từ thư mục gốc xuống (topmostDirWithoutMarkdown()):
+     * gặp $pageDirs trước -> dừng, an toàn; gặp thư mục không nằm trong cả 2
+     * tập trên trước -> đó là ranh giới "rác" cao nhất, xoá đúng 1 lần cho
+     * cả cụm thay vì lặp lại cho từng file con bên trong nó.
+     *
+     * @return string[] Danh sách relPath (so với $pagesRemoteRoot) các thư mục đã bị xoá — để
+     *         caller dọn nốt các key baseline liên quan (xem stepSyncJob()).
+     */
+    private function pruneMarkdownlessPagesDirs(?BackupManager $backup, FtpClient $ftp, string $pagesRemoteRoot): array
+    {
+        $scanner = new FileScanner($this->ignorePatterns());
+        $allFiles = $ftp->scan($pagesRemoteRoot, [$scanner, 'isIgnored']);
+
+        $pageDirs = [];
+        $ancestorsOfPageDirs = [];
+        foreach (array_keys($allFiles) as $relPath) {
+            if (strtolower(substr($relPath, -3)) !== '.md') {
+                continue;
+            }
+            $dir = dirname($relPath);
+            if ($dir === '.' || $dir === '') {
+                continue;
+            }
+            $pageDirs[$dir] = true;
+
+            $ancestor = dirname($dir);
+            while ($ancestor !== '.' && $ancestor !== '' && !isset($ancestorsOfPageDirs[$ancestor])) {
+                $ancestorsOfPageDirs[$ancestor] = true;
+                $ancestor = dirname($ancestor);
+            }
+        }
+
+        $toDelete = [];
+        foreach (array_keys($allFiles) as $relPath) {
+            $dir = dirname($relPath);
+            if ($dir === '.' || $dir === '') {
+                continue;
+            }
+            $garbageDir = $this->topmostDirWithoutMarkdown($dir, $pageDirs, $ancestorsOfPageDirs);
+            if ($garbageDir !== null) {
+                $toDelete[$garbageDir] = true;
+            }
+        }
+
+        $deleted = array_keys($toDelete);
+        foreach ($deleted as $relDir) {
+            $remoteDir = rtrim($pagesRemoteRoot, '/') . '/' . $relDir;
+            $this->backupRemoteDir($backup, $ftp, $relDir, $remoteDir);
+            $ftp->removeDirRecursive($remoteDir);
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * Đi từ thư mục cao nhất xuống $relDir: gặp $pageDirs trước -> null (an
+     * toàn, đã chạm vào thư mục trang thật, mọi thứ sâu hơn thuộc về nó);
+     * gặp thư mục không thuộc cả $pageDirs lẫn $ancestorsOfPageDirs trước ->
+     * trả về đó (ranh giới "rác" nông nhất); ngược lại tiếp tục xuống sâu hơn.
+     */
+    private function topmostDirWithoutMarkdown(string $relDir, array $pageDirs, array $ancestorsOfPageDirs): ?string
+    {
+        $parts = explode('/', $relDir);
+        $current = '';
+        foreach ($parts as $part) {
+            $current = $current === '' ? $part : $current . '/' . $part;
+            if (isset($pageDirs[$current])) {
+                return null;
+            }
+            if (!isset($ancestorsOfPageDirs[$current])) {
+                return $current;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Backup TOÀN BỘ nội dung 1 thư mục remote trước khi xoá đệ quy cả thư
+     * mục đó (action 'delete_remote_dir') — quét lại đệ quy $remoteDir (network
+     * round-trip riêng, chấp nhận được vì đây là thao tác xoá cả folder, ít
+     * xảy ra và luôn cần backup trước theo đúng cam kết của plugin), rồi
+     * backup từng file con qua backupRemote() sẵn có.
+     */
+    private function backupRemoteDir(?BackupManager $backup, FtpClient $ftp, string $relDir, string $remoteDir): void
+    {
+        if (!$backup) {
+            return;
+        }
+        $scanner = new FileScanner($this->ignorePatterns());
+        foreach ($ftp->scan($remoteDir, [$scanner, 'isIgnored']) as $childRelPath => $stat) {
+            $this->backupRemote($backup, $ftp, $relDir . '/' . $childRelPath, rtrim($remoteDir, '/') . '/' . $childRelPath);
+        }
     }
 
     private function backupRemote(?BackupManager $backup, FtpClient $ftp, string $relPath, string $remoteFile): void

@@ -95,6 +95,9 @@ class FTPSyncPlugin extends Plugin
             $group->post('/push-local', [$controller, 'startPushFromLocal']);
             $group->post('/push-local/{jobId}/step', [$controller, 'stepPushFromLocal']);
 
+            $group->post('/cleanup-hosting', [$controller, 'startCleanupHosting']);
+            $group->post('/cleanup-hosting/{jobId}/step', [$controller, 'stepCleanupHosting']);
+
             $group->post('/sync', [$controller, 'startSync']);
             $group->post('/sync/{jobId}/step', [$controller, 'stepSync']);
 
@@ -257,6 +260,12 @@ HTML;
         } elseif ($task === 'ftpsyncpushlocalstep') {
             $event->stopPropagation();
             $this->handlePushFromLocalStep($controller->post ?? []);
+        } elseif ($task === 'ftpsynccleanupstart') {
+            $event->stopPropagation();
+            $this->handleCleanupHostingStart($controller->post ?? []);
+        } elseif ($task === 'ftpsynccleanupstep') {
+            $event->stopPropagation();
+            $this->handleCleanupHostingStep($controller->post ?? []);
         } elseif ($task === 'ftpsyncsyncstart') {
             $event->stopPropagation();
             $this->handleSyncStart($controller->post ?? []);
@@ -347,6 +356,42 @@ HTML;
 
         try {
             $result = $this->syncManager()->stepPushFromLocalJob($jobId);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 1/2 của "Cleanup Hosting": xây hàng đợi group cần quét remote, trả về job_id + tổng số để UI vẽ progress bar. */
+    private function handleCleanupHostingStart(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $kinds = array_values((array) ($post['kinds'] ?? []));
+        $sinceMtime = (int) ($post['since_mtime'] ?? 0);
+        $collapseFolders = filter_var($post['collapse_folders'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        try {
+            $result = $this->syncManager()->startCleanupHostingJob($kinds, $sinceMtime, $collapseFolders);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 2/2: xử lý 1 group (quét remote) của job "Cleanup Hosting" — UI gọi lặp lại tới khi finished=true. */
+    private function handleCleanupHostingStep(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $jobId = (string) ($post['job_id'] ?? '');
+
+        try {
+            $result = $this->syncManager()->stepCleanupHostingJob($jobId);
             $this->grav['admin']->json_response = ['status' => 'success'] + $result;
         } catch (\Throwable $e) {
             $this->jsonError($e->getMessage());

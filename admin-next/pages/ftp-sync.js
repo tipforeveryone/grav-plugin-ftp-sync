@@ -67,6 +67,7 @@ const KINDS = [
 const TYPE_LABELS = {
     missing_remote: 'Missing on Hosting',
     missing_local: 'Missing on Local',
+    missing_local_dir: 'Missing on Local (whole folder)',
     changed: 'Different — size or mtime differ',
 };
 
@@ -78,7 +79,19 @@ const RESOLUTION_OPTIONS = [
     ['delete_remote', 'Delete on Hosting'],
 ];
 
+// A row representing an entire orphaned folder (Cleanup Hosting only) only
+// makes sense with one action — "Use Local/Hosting version" and "Delete on
+// Local" are meaningless since the folder doesn't exist on Local at all.
+const FOLDER_RESOLUTION_OPTIONS = [
+    ['', 'No action'],
+    ['delete_remote_dir', 'Delete folder on Hosting (recursive)'],
+];
+
 function defaultResolution(row, forceResolution) {
+    // missing_local_dir only ever comes from "Cleanup Hosting" — always
+    // default to deleting the whole folder, ignoring forceResolution
+    // ('delete_remote', meant for individual file rows) passed by that flow.
+    if (row.type === 'missing_local_dir') return 'delete_remote_dir';
     if (forceResolution) return forceResolution;
     if (row.type === 'changed') {
         if (row.newer === 'local') return 'local';
@@ -103,7 +116,7 @@ function kindOfPath(path) {
 function statusGroup(type) {
     if (type === 'changed') return 'changed';
     if (type === 'missing_remote') return 'local_only';
-    if (type === 'missing_local') return 'host_only';
+    if (type === 'missing_local' || type === 'missing_local_dir') return 'host_only';
     return '';
 }
 
@@ -122,6 +135,7 @@ function statusCells(row) {
         case 'missing_remote':
             return [xCell, empty];
         case 'missing_local':
+        case 'missing_local_dir':
             return [empty, xCell];
         default:
             return [empty, empty];
@@ -145,6 +159,11 @@ function defaultPushLocalSince() {
     return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
 }
 
+/** Default the "Cleanup Hosting" modal to 1 day before the current time — same rationale as defaultPushLocalSince(). */
+function defaultCleanupHostingSince() {
+    return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
+}
+
 function formatDate(unixTime) {
     const d = new Date(unixTime * 1000);
     const pad = (n) => (n < 10 ? '0' + n : '' + n);
@@ -158,6 +177,8 @@ class FtpSyncPage extends HTMLElement {
         this._isEnabled = false;
         this._backupPath = '';
         this._lastRows = {};
+        this._lastCleanupRows = {};
+        this._lastKinds = [];
         this._fullDeployCancelToken = null;
     }
 
@@ -221,7 +242,7 @@ class FtpSyncPage extends HTMLElement {
                 <div class="fts-toolbar">
                     <button type="button" class="fts-btn" data-action="check-diff" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-refresh"></i> Check differences</button>
                     <button type="button" class="fts-btn" data-action="push-local" ${this._isEnabled ? '' : 'disabled'} title="Only scans LOCAL files with mtime after a chosen point in time, then compares just those against Hosting — faster than 'Check differences' when only a few files changed in a large tree."><i class="fa fa-upload"></i> Push from Local</button>
-                    <button type="button" class="fts-btn fts-btn-primary" data-action="sync-now" disabled><i class="fa fa-cloud-upload"></i> Sync now</button>
+                    <button type="button" class="fts-btn" data-action="cleanup-hosting" ${this._isEnabled ? '' : 'disabled'} title="Only scans HOSTING files with mtime after a chosen point in time, and lists ones that no longer exist on Local — useful for removing leftover files after renaming/deleting content locally."><i class="fa fa-trash"></i> Cleanup Hosting</button>
                     <button type="button" class="fts-btn" data-action="full-deploy" ${this._isEnabled && this._isLocal ? '' : 'disabled'} title="Bundles the ENTIRE site into one .zip. Deleting old files on hosting and uploading is up to you."><i class="fa fa-rocket"></i> Compress full site</button>
                     <button type="button" class="fts-btn" data-action="mark-synced" style="display:none" ${this._isLocal ? '' : 'disabled'} title="Click ONLY after you have manually uploaded and extracted this zip on Hosting."><i class="fa fa-check"></i> Mark as deployed</button>
                     <button type="button" class="fts-btn" data-action="show-backups" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-archive"></i> Show backups</button>
@@ -240,6 +261,25 @@ class FtpSyncPage extends HTMLElement {
                     <div class="fts-modal-actions">
                         <button type="button" class="fts-btn" data-action="push-local-cancel">Cancel</button>
                         <button type="button" class="fts-btn fts-btn-primary" data-action="push-local-run">Run</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="fts-modal-overlay" data-modal="cleanup-hosting" style="display:none">
+                <div class="fts-modal-box">
+                    <h3><i class="fa fa-trash"></i> Cleanup Hosting</h3>
+                    <p>Only scans Hosting files (within the Category selection above) with <b>mtime after</b> the point in time below, then lists the ones that no longer exist on Local. Each row defaults to "Delete on Hosting".</p>
+                    <label class="fts-modal-field">
+                        Since (only hosting files modified AFTER this):
+                        <input type="datetime-local" class="fts-cleanup-hosting-since">
+                    </label>
+                    <label class="fts-modal-checkbox">
+                        <input type="checkbox" class="fts-cleanup-hosting-collapse">
+                        <span>Collapse by folder: if a whole folder no longer exists on Local <b>and it has no nested subfolder with its own content</b> (e.g. a child page), delete that entire folder on Hosting instead of listing every file inside it. Folders with nested content are always left as individual file rows, never bulk-deleted. Still a stronger action — double-check the list before Sync now.</span>
+                    </label>
+                    <div class="fts-modal-actions">
+                        <button type="button" class="fts-btn" data-action="cleanup-hosting-cancel">Cancel</button>
+                        <button type="button" class="fts-btn fts-btn-primary" data-action="cleanup-hosting-run">Run</button>
                     </div>
                 </div>
             </div>
@@ -310,6 +350,17 @@ class FtpSyncPage extends HTMLElement {
                     <thead><tr><th class="fts-col-checkbox"><input type="checkbox" class="fts-select-all"></th><th>File</th><th class="fts-col-status">Local</th><th class="fts-col-status">Host</th><th class="fts-col-action">Action</th></tr></thead>
                     <tbody></tbody>
                 </table>
+                <div class="fts-results-actions">
+                    <button type="button" class="fts-btn fts-btn-primary" data-action="sync-now"><i class="fa fa-cloud-upload"></i> Sync now</button>
+                </div>
+            </div>
+
+            <div class="fts-cleanup-summary" style="display:none">
+                <p class="fts-cleanup-summary-text"></p>
+                <ul class="fts-cleanup-summary-list"></ul>
+                <div class="fts-results-actions">
+                    <button type="button" class="fts-btn fts-btn-primary" data-action="cleanup-run"><i class="fa fa-trash"></i> Clean up</button>
+                </div>
             </div>
         `;
 
@@ -326,7 +377,14 @@ class FtpSyncPage extends HTMLElement {
         this._q('[data-modal="push-local"]')?.addEventListener('click', (e) => {
             if (e.target === e.currentTarget) this._closePushLocalModal();
         });
+        this._q('[data-action="cleanup-hosting"]')?.addEventListener('click', () => this._openCleanupHostingModal());
+        this._q('[data-action="cleanup-hosting-cancel"]')?.addEventListener('click', () => this._closeCleanupHostingModal());
+        this._q('[data-action="cleanup-hosting-run"]')?.addEventListener('click', () => this._runCleanupHosting());
+        this._q('[data-modal="cleanup-hosting"]')?.addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) this._closeCleanupHostingModal();
+        });
         this._q('[data-action="sync-now"]')?.addEventListener('click', () => this._runSync());
+        this._q('[data-action="cleanup-run"]')?.addEventListener('click', () => this._runCleanup());
         this._q('[data-action="full-deploy"]')?.addEventListener('click', () => this._runFullDeploy());
         this._q('[data-action="mark-synced"]')?.addEventListener('click', () => this._runMarkSynced());
         this._q('[data-action="cancel-compress"]')?.addEventListener('click', () => this._requestCancelFullDeploy());
@@ -378,6 +436,14 @@ class FtpSyncPage extends HTMLElement {
         return [...this.querySelectorAll('.fts-kind')].filter((cb) => cb.checked).map((cb) => cb.value);
     }
 
+    /**
+     * "Sync now" stays clickable even with zero rows when Pages was part of
+     * this scan — see the "pagesInScope" comment in _renderRows() for why.
+     */
+    _hasSyncableContent(rows) {
+        return Object.keys(rows || {}).length > 0 || this._lastKinds.includes('pages');
+    }
+
     async _runBatchedJob(stepFn, label, onDone, onError, cancelToken) {
         try {
             const data = await stepFn();
@@ -408,9 +474,11 @@ class FtpSyncPage extends HTMLElement {
             this._setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) to check.', true);
             return;
         }
+        this._lastKinds = kinds;
 
         const checkBtn = this._q('[data-action="check-diff"]');
         const syncBtn = this._q('[data-action="sync-now"]');
+        this._q('.fts-cleanup-summary').style.display = 'none';
         this._setStatus('Checking...', false);
         checkBtn.disabled = true;
         syncBtn.disabled = true;
@@ -424,7 +492,7 @@ class FtpSyncPage extends HTMLElement {
                 (finalData) => {
                     checkBtn.disabled = false;
                     this._renderRows(finalData.rows || {});
-                    syncBtn.disabled = !this._isLocal || Object.keys(finalData.rows || {}).length === 0;
+                    syncBtn.disabled = !this._isLocal || !this._hasSyncableContent(finalData.rows || {});
                 },
                 (message) => {
                     this._setStatus('Error: ' + message, true);
@@ -469,11 +537,13 @@ class FtpSyncPage extends HTMLElement {
 
         const sinceMtime = Math.floor(new Date(input.value).getTime() / 1000);
         const kinds = this._selectedKinds();
+        this._lastKinds = kinds;
         this._closePushLocalModal();
 
         const checkBtn = this._q('[data-action="check-diff"]');
         const pushLocalBtn = this._q('[data-action="push-local"]');
         const syncBtn = this._q('[data-action="sync-now"]');
+        this._q('.fts-cleanup-summary').style.display = 'none';
         this._setStatus('Checking (Push from Local)...', false);
         checkBtn.disabled = true;
         pushLocalBtn.disabled = true;
@@ -495,7 +565,7 @@ class FtpSyncPage extends HTMLElement {
                         forceResolution: 'local',
                         emptyMessage: 'No local files modified after the selected time.',
                     });
-                    syncBtn.disabled = !this._isLocal || Object.keys(finalData.rows || {}).length === 0;
+                    syncBtn.disabled = !this._isLocal || !this._hasSyncableContent(finalData.rows || {});
                 },
                 (message) => {
                     this._setStatus('Error: ' + message, true);
@@ -510,27 +580,161 @@ class FtpSyncPage extends HTMLElement {
         }
     }
 
+    _openCleanupHostingModal() {
+        const kinds = this._selectedKinds();
+        if (kinds.length === 0) {
+            this._setStatus('Select at least 1 category (Pages/Themes/Plugins/Config/Accounts) to check.', true);
+            return;
+        }
+        const input = this._q('.fts-cleanup-hosting-since');
+        input.value = defaultCleanupHostingSince();
+        this._q('[data-modal="cleanup-hosting"]').style.display = 'flex';
+        input.focus();
+    }
+
+    _closeCleanupHostingModal() {
+        this._q('[data-modal="cleanup-hosting"]').style.display = 'none';
+    }
+
+    /**
+     * "Cleanup Hosting": scans only Hosting (filtered by mtime server-side),
+     * keeps just the files that no longer exist on Local. Unlike Check
+     * differences/Push from Local, this never shows the full comparison
+     * table (there is no per-row choice to make here — every result is
+     * always deleted) — just a plain list of what was found, and a "Clean
+     * up" button that deletes exactly that list.
+     */
+    async _runCleanupHosting() {
+        const input = this._q('.fts-cleanup-hosting-since');
+        if (!input.value) {
+            this._setStatus('Choose a point in time first.', true);
+            return;
+        }
+
+        const sinceMtime = Math.floor(new Date(input.value).getTime() / 1000);
+        const kinds = this._selectedKinds();
+        this._lastKinds = kinds;
+        const collapseFolders = this._q('.fts-cleanup-hosting-collapse').checked;
+        this._closeCleanupHostingModal();
+
+        const checkBtn = this._q('[data-action="check-diff"]');
+        const cleanupBtn = this._q('[data-action="cleanup-hosting"]');
+        this._q('.fts-results').style.display = 'none';
+        this._setStatus('Checking (Cleanup Hosting)...', false);
+        checkBtn.disabled = true;
+        cleanupBtn.disabled = true;
+
+        try {
+            const data = await this._fetch('/ftp-sync/cleanup-hosting', {
+                method: 'POST',
+                body: JSON.stringify({ kinds, since_mtime: sinceMtime, collapse_folders: collapseFolders }),
+            });
+            this._showProgress(0, data.total, data.label || 'Scanning');
+            await this._runBatchedJob(
+                () => this._fetch(`/ftp-sync/cleanup-hosting/${data.job_id}/step`, { method: 'POST', body: '{}' }),
+                'Scanning',
+                (finalData) => {
+                    checkBtn.disabled = false;
+                    cleanupBtn.disabled = false;
+                    this._renderCleanupSummary(finalData.rows || {});
+                },
+                (message) => {
+                    this._setStatus('Error: ' + message, true);
+                    checkBtn.disabled = false;
+                    cleanupBtn.disabled = false;
+                },
+            );
+        } catch (err) {
+            this._setStatus('Error: ' + err.message, true);
+            checkBtn.disabled = false;
+            cleanupBtn.disabled = false;
+        }
+    }
+
+    /**
+     * "Cleanup Hosting" result view: unlike _renderRows() (Check differences/
+     * Push from Local), there is no per-row choice to make here — every
+     * result found is always going to be deleted — so this skips the
+     * filterable table/dropdowns entirely and just lists the paths, with a
+     * single "Clean up" button that deletes exactly that list.
+     */
+    _renderCleanupSummary(rows) {
+        this._lastCleanupRows = rows || {};
+        const summary = this._q('.fts-cleanup-summary');
+        const listEl = this._q('.fts-cleanup-summary-list');
+        const textEl = this._q('.fts-cleanup-summary-text');
+        const cleanupRunBtn = this._q('[data-action="cleanup-run"]');
+        const paths = Object.keys(this._lastCleanupRows).sort();
+
+        // Even with zero items found, still surface "Clean up" when Pages was
+        // part of this scan — see the "pagesInScope" comment in _renderRows()
+        // for why: the automatic Pages garbage-folder cleanup pass runs
+        // unconditionally inside the sync step and must stay reachable even
+        // when there's nothing else to clean up.
+        const pagesInScope = this._lastKinds.includes('pages');
+
+        if (paths.length === 0) {
+            listEl.innerHTML = '';
+            listEl.style.display = 'none';
+            textEl.textContent = 'No leftover files or folders found on Hosting for the selected time.';
+            summary.style.display = pagesInScope ? '' : 'none';
+            cleanupRunBtn.disabled = !this._isLocal || !pagesInScope;
+            this._setStatus('No leftover files or folders found on Hosting for the selected time.', false);
+            return;
+        }
+
+        textEl.textContent = `Found ${paths.length} leftover file(s)/folder(s) on Hosting no longer present on Local:`;
+        listEl.style.display = '';
+        listEl.innerHTML = paths.map((path) => {
+            const row = this._lastCleanupRows[path];
+            const displayPath = row.type === 'missing_local_dir' ? path + '/** (whole folder)' : path;
+            return `<li>${this._escape(displayPath)}</li>`;
+        }).join('');
+        summary.style.display = '';
+        cleanupRunBtn.disabled = !this._isLocal;
+        this._setStatus(`${paths.length} item(s) found.`, false);
+    }
+
     _renderRows(rows, opts = {}) {
         this._lastRows = rows || {};
         const tbody = this._q('.fts-diff-table tbody');
         const results = this._q('.fts-results');
+        const filters = this._q('.fts-filters');
+        const bulk = this._q('.fts-bulk');
+        const table = this._q('.fts-diff-table');
         tbody.innerHTML = '';
         const paths = Object.keys(this._lastRows).sort();
 
         if (paths.length === 0) {
-            results.style.display = 'none';
+            // Even with zero file-level differences, still surface "Sync now"
+            // when Pages was part of this scan — it silently checks Hosting
+            // for leftover empty/markdown-less Pages folders regardless of
+            // whether any file needed syncing (see startSyncJob() in
+            // SyncManager.php), so hiding the button entirely here would make
+            // that cleanup pass unreachable whenever there's nothing else to sync.
+            const pagesInScope = this._lastKinds.includes('pages');
+            filters.style.display = pagesInScope ? 'none' : '';
+            bulk.style.display = pagesInScope ? 'none' : '';
+            table.style.display = pagesInScope ? 'none' : '';
+            results.style.display = pagesInScope ? '' : 'none';
             this._setStatus(opts.emptyMessage || 'No differences — local and hosting are in sync.', false);
             return;
         }
 
+        filters.style.display = '';
+        bulk.style.display = '';
+        table.style.display = '';
         tbody.innerHTML = paths.map((path) => {
             const row = this._lastRows[path];
             const cells = statusCells(row);
-            const options = RESOLUTION_OPTIONS.map(([v, l]) => `<option value="${v}" ${defaultResolution(row, opts.forceResolution) === v ? 'selected' : ''}>${l}</option>`).join('');
+            const isFolder = row.type === 'missing_local_dir';
+            const optionList = isFolder ? FOLDER_RESOLUTION_OPTIONS : RESOLUTION_OPTIONS;
+            const options = optionList.map(([v, l]) => `<option value="${v}" ${defaultResolution(row, opts.forceResolution) === v ? 'selected' : ''}>${l}</option>`).join('');
+            const displayPath = isFolder ? path + '/**' : path;
             return `
                 <tr data-path="${this._escape(path)}" data-kind="${kindOfPath(path)}" data-status-group="${statusGroup(row.type)}">
                     <td class="fts-col-checkbox"><input type="checkbox" class="fts-row-select"></td>
-                    <td title="${this._escape(TYPE_LABELS[row.type] || row.type)}">${this._escape(path)}</td>
+                    <td title="${this._escape(TYPE_LABELS[row.type] || row.type)}">${this._escape(displayPath)}</td>
                     <td class="fts-col-status ${cells[0].cls}">${cells[0].text}</td>
                     <td class="fts-col-status ${cells[1].cls}">${cells[1].text}</td>
                     <td class="fts-col-action"><select class="fts-resolution" data-path="${this._escape(path)}">${options}</select></td>
@@ -575,7 +779,7 @@ class FtpSyncPage extends HTMLElement {
             local_newer: (row) => row.type === 'changed' && row.newer === 'local',
             host_newer: (row) => row.type === 'changed' && row.newer === 'remote',
             local_only: (row) => row.type === 'missing_remote',
-            host_only: (row) => row.type === 'missing_local',
+            host_only: (row) => row.type === 'missing_local' || row.type === 'missing_local_dir',
         };
         const matcher = matchers[kind];
         if (!matcher) return;
@@ -612,12 +816,19 @@ class FtpSyncPage extends HTMLElement {
     }
 
     async _runSync() {
-        if (!window.confirm('Sync now? Files about to be overwritten will be backed up automatically first.')) return;
-
         const resolutions = {};
+        let folderDeletes = 0;
         this.querySelectorAll('.fts-resolution').forEach((select) => {
-            if (select.value) resolutions[select.dataset.path] = select.value;
+            if (select.value) {
+                resolutions[select.dataset.path] = select.value;
+                if (select.value === 'delete_remote_dir') folderDeletes++;
+            }
         });
+
+        const confirmMessage = folderDeletes > 0
+            ? `Sync now? This will PERMANENTLY delete ${folderDeletes} whole folder(s) on Hosting (all files inside included). A backup zip is still created first, but double-check the list before continuing.`
+            : 'Sync now? Files about to be overwritten will be backed up automatically first.';
+        if (!window.confirm(confirmMessage)) return;
 
         const syncBtn = this._q('[data-action="sync-now"]');
         this._setStatus('Starting sync...', false);
@@ -625,18 +836,26 @@ class FtpSyncPage extends HTMLElement {
 
         try {
             const data = await this._fetch('/ftp-sync/sync', { method: 'POST', body: JSON.stringify({ resolutions }) });
-            if (data.total === 0) {
+            // Even with zero ops, still run the step call when the backend
+            // flags a pending Pages cleanup (has_pages_cleanup) — that pass
+            // runs unconditionally inside stepSyncJob() regardless of mtime
+            // or whether anything else got deleted, so it must not be
+            // skipped just because there was nothing else to sync.
+            if (data.total === 0 && !data.has_pages_cleanup) {
                 this._setStatus('Nothing to sync (no rows had an action selected).', false);
                 syncBtn.disabled = !this._isLocal;
                 return;
             }
-            this._showProgress(0, data.total, 'Syncing');
+            this._showProgress(0, Math.max(data.total, 1), 'Syncing');
             await this._runBatchedJob(
                 () => this._fetch(`/ftp-sync/sync/${data.job_id}/step`, { method: 'POST', body: '{}' }),
                 'Syncing',
                 (finalData) => {
                     let msg = `Applied ${finalData.applied} change(s), skipped ${finalData.skipped}.`;
                     if (finalData.backup) msg += ` Backup: ${finalData.backup}`;
+                    if (finalData.pages_cleanup && finalData.pages_cleanup.deleted_dirs > 0) {
+                        msg += ` Cleaned up ${finalData.pages_cleanup.deleted_dirs} leftover Pages folder(s) on Hosting.`;
+                    }
                     if (finalData.errors && Object.keys(finalData.errors).length > 0) {
                         msg += ` ${Object.keys(finalData.errors).length} file(s) failed (see console).`;
                         console.error('FTP Sync errors:', finalData.errors);
@@ -653,6 +872,69 @@ class FtpSyncPage extends HTMLElement {
         } catch (err) {
             this._setStatus('Error: ' + err.message, true);
             syncBtn.disabled = !this._isLocal;
+        }
+    }
+
+    /**
+     * "Clean up": the Cleanup Hosting equivalent of _runSync(), but with no
+     * per-row resolution to read from the DOM (there is none — the summary
+     * list has no dropdowns) — every listed item always resolves to its
+     * natural deletion action (delete_remote for files, delete_remote_dir
+     * for collapsed folders), reusing the exact same /ftp-sync/sync backend
+     * flow as "Sync now".
+     */
+    async _runCleanup() {
+        const resolutions = {};
+        let folderDeletes = 0;
+        Object.entries(this._lastCleanupRows).forEach(([path, row]) => {
+            const resolution = row.type === 'missing_local_dir' ? 'delete_remote_dir' : 'delete_remote';
+            resolutions[path] = resolution;
+            if (resolution === 'delete_remote_dir') folderDeletes++;
+        });
+
+        const itemCount = Object.keys(this._lastCleanupRows).length;
+        let confirmMessage;
+        if (itemCount === 0) {
+            confirmMessage = 'Nothing listed to delete, but this will still check Hosting for leftover empty/markdown-less Pages folders. Continue?';
+        } else if (folderDeletes > 0) {
+            confirmMessage = `Clean up? This will PERMANENTLY delete ${itemCount} item(s) on Hosting, including ${folderDeletes} whole folder(s) (all files inside included). A backup zip is still created first, but double-check the list before continuing.`;
+        } else {
+            confirmMessage = `Clean up? This will PERMANENTLY delete ${itemCount} item(s) on Hosting. A backup zip is still created first.`;
+        }
+        if (!window.confirm(confirmMessage)) return;
+
+        const cleanupRunBtn = this._q('[data-action="cleanup-run"]');
+        this._setStatus('Starting clean up...', false);
+        cleanupRunBtn.disabled = true;
+
+        try {
+            const data = await this._fetch('/ftp-sync/sync', { method: 'POST', body: JSON.stringify({ resolutions }) });
+            this._showProgress(0, Math.max(data.total, 1), 'Cleaning up');
+            await this._runBatchedJob(
+                () => this._fetch(`/ftp-sync/sync/${data.job_id}/step`, { method: 'POST', body: '{}' }),
+                'Cleaning up',
+                (finalData) => {
+                    let msg = `Applied ${finalData.applied} change(s), skipped ${finalData.skipped}.`;
+                    if (finalData.backup) msg += ` Backup: ${finalData.backup}`;
+                    if (finalData.pages_cleanup && finalData.pages_cleanup.deleted_dirs > 0) {
+                        msg += ` Cleaned up ${finalData.pages_cleanup.deleted_dirs} leftover Pages folder(s) on Hosting.`;
+                    }
+                    if (finalData.errors && Object.keys(finalData.errors).length > 0) {
+                        msg += ` ${Object.keys(finalData.errors).length} file(s) failed (see console).`;
+                        console.error('FTP Sync errors:', finalData.errors);
+                    }
+                    this._setStatus(msg, false);
+                    this._q('.fts-cleanup-summary').style.display = 'none';
+                    cleanupRunBtn.disabled = !this._isLocal;
+                },
+                (message) => {
+                    this._setStatus('Error: ' + message, true);
+                    cleanupRunBtn.disabled = !this._isLocal;
+                },
+            );
+        } catch (err) {
+            this._setStatus('Error: ' + err.message, true);
+            cleanupRunBtn.disabled = !this._isLocal;
         }
     }
 
@@ -900,6 +1182,11 @@ class FtpSyncPage extends HTMLElement {
                 .fts-resolution { width: 100%; border: 1px solid var(--border, #e5e7eb); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
                 .fts-filters, .fts-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
                 .fts-filters select, .fts-bulk select { border: 1px solid var(--border, #e5e7eb); border-radius: 4px; padding: 4px 8px; font-size: 12.5px; }
+                .fts-results-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+                .fts-cleanup-summary { border: 1px solid var(--border, #e5e7eb); border-radius: 6px; padding: 14px 16px; margin-top: 10px; background: var(--card, #fff); }
+                .fts-cleanup-summary-text { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--foreground, #1f2937); }
+                .fts-cleanup-summary-list { margin: 0 0 10px; padding-left: 20px; max-height: 260px; overflow-y: auto; font-size: 12.5px; font-family: monospace; color: var(--foreground, #1f2937); }
+                .fts-cleanup-summary-list li { margin-bottom: 3px; word-break: break-all; }
                 .fts-status { font-size: 13px; color: var(--foreground, #1f2937); }
                 .fts-status-error { color: var(--destructive, #dc2626); }
                 .fts-hint { font-size: 12.5px; color: var(--muted-foreground, #6b7280); }
@@ -911,6 +1198,8 @@ class FtpSyncPage extends HTMLElement {
                 .fts-modal-box p { color: var(--muted-foreground, #6b7280); font-size: 12.5px; }
                 .fts-modal-field { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; font-weight: 600; font-size: 12.5px; }
                 .fts-modal-field input { padding: 6px 8px; border: 1px solid var(--border, #e5e7eb); border-radius: 4px; font-weight: normal; background: var(--card, #fff); color: var(--foreground, #1f2937); }
+                .fts-modal-checkbox { display: flex; align-items: flex-start; gap: 8px; margin: 14px 0; font-weight: normal; font-size: 12px; color: var(--muted-foreground, #6b7280); }
+                .fts-modal-checkbox input { margin-top: 3px; }
                 .fts-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
             </style>
         `;
