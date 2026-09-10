@@ -41,6 +41,7 @@ class FtpSyncApiController extends AbstractApiController
             'is_local' => $this->isLocalEnvironment(),
             'is_enabled' => $this->isEnabled(),
             'backup_path' => 'user/data/ftp-sync/backups',
+            'hosting_cp_url' => (string) $this->config->get('plugins.ftp-sync.hosting_cp_url', ''),
         ]);
     }
 

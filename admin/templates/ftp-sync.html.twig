@@ -403,6 +403,16 @@
                 <a class="button" href="{{ admin_route('/plugins/ftp-sync') }}">
                     <i class="fa fa-cog"></i> Plugin Settings
                 </a>
+                {% set hosting_cp_url = ftp_sync_hosting_cp_url() %}
+                {% if hosting_cp_url %}
+                    <a class="button" href="{{ hosting_cp_url }}" target="_blank" rel="noopener">
+                        <i class="fa fa-external-link"></i> Open Hosting CP
+                    </a>
+                {% else %}
+                    <a class="button" style="pointer-events:none;opacity:.5" title="Set 'Hosting CP Address' in Plugin Settings first.">
+                        <i class="fa fa-external-link"></i> Open Hosting CP
+                    </a>
+                {% endif %}
             </div>
         </div>
     </div>

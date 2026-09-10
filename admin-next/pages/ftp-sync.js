@@ -200,6 +200,7 @@ class FtpSyncPage extends HTMLElement {
             this._isLocal = !!status.is_local;
             this._isEnabled = !!status.is_enabled;
             this._backupPath = status.backup_path || 'user/data/ftp-sync/backups';
+            this._hostingCpUrl = status.hosting_cp_url || '';
             this._render();
         } catch (err) {
             this.querySelector('.fts-wrapper').innerHTML = `<p class="fts-error">${this._escape(err.message || 'Load failed')}</p>`;
@@ -233,6 +234,9 @@ class FtpSyncPage extends HTMLElement {
                     <button type="button" class="fts-btn" data-action="mark-synced" style="display:none" ${this._isLocal ? '' : 'disabled'} title="Click ONLY after you have manually uploaded and extracted this zip on Hosting."><i class="fa fa-check"></i> Mark as deployed</button>
                     <button type="button" class="fts-btn" data-action="show-backups" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-archive"></i> Show backups</button>
                     <a class="fts-btn" href="${this._escape(APP_BASE)}/plugins/ftp-sync"><i class="fa fa-cog"></i> Plugin Settings</a>
+                    ${this._hostingCpUrl
+                        ? `<a class="fts-btn" href="${this._escape(this._hostingCpUrl)}" target="_blank" rel="noopener"><i class="fa fa-external-link"></i> Open Hosting CP</a>`
+                        : `<a class="fts-btn" style="pointer-events:none;opacity:.5" title="Set 'Hosting CP Address' in Plugin Settings first."><i class="fa fa-external-link"></i> Open Hosting CP</a>`}
                 </div>
             </div>
 

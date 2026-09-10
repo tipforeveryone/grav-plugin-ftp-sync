@@ -194,12 +194,21 @@ HTML;
         $this->grav['twig']->twig()->addFunction(
             new \Twig\TwigFunction('ftp_sync_backup_path', [$this, 'backupPath'])
         );
+        $this->grav['twig']->twig()->addFunction(
+            new \Twig\TwigFunction('ftp_sync_hosting_cp_url', [$this, 'hostingCpUrl'])
+        );
     }
 
     /** Đường dẫn thư mục backup, tương đối so với gốc project (để copy dán vào File Explorer). */
     public function backupPath(): string
     {
         return 'user/data/ftp-sync/backups';
+    }
+
+    /** Link control panel hosting đã lưu trong config, dùng cho nút "Open Hosting CP". Rỗng nếu chưa cấu hình. */
+    public function hostingCpUrl(): string
+    {
+        return (string) $this->config->get('plugins.ftp-sync.hosting_cp_url', '');
     }
 
     private function registerAutoload(): void

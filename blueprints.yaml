@@ -55,6 +55,14 @@ form:
       validate:
         required: true
 
+    hosting_cp_url:
+      type: text
+      label: Hosting CP Address
+      help: 'Link to the hosting control panel (cPanel/DirectAdmin/Plesk...). Used by the "Open Hosting CP" button on the FTP Sync page to open it in a new tab.'
+      validate:
+        type: url
+        required: false
+
     sync_plugins:
       type: checkboxes
       label: Plugins to sync
