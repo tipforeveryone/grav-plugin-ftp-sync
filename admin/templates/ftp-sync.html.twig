@@ -391,7 +391,7 @@
                 </button>
                 <button type="button" class="button" id="sc-pull-hosting" {{ sync_enabled ? '' : 'disabled' }}
                         title="Chỉ áp dụng cho Pages. Quét các trang HOSTING có mtime sau 1 mốc thời gian bạn chọn, so sánh với Local, và mặc định mọi dòng là 'Use Hosting version' — dùng để kéo nội dung vừa sửa trực tiếp trên Hosting về lại Local.">
-                    <i class="fa fa-download"></i> Pull from Hosting
+                    <i class="fa fa-download"></i> Pull Pages from Hosting
                 </button>
                 <button type="button" class="button" id="sc-full-deploy" {{ sync_enabled ? '' : 'disabled' }}
                         title="Ignores the categories above — bundles the ENTIRE site (minus dev-only files) into one .zip in user/data/ftp-sync/. Deleting old files on hosting and uploading the zip are up to you.">
@@ -453,7 +453,7 @@
 
     <div id="sc-pull-hosting-modal" class="sc-modal-overlay" style="display:none">
         <div class="sc-modal-box">
-            <h3><i class="fa fa-download"></i> Pull from Hosting</h3>
+            <h3><i class="fa fa-download"></i> Pull Pages from Hosting</h3>
             <p>Chỉ áp dụng cho <b>Pages</b> (Category đã tick ở trên không ảnh hưởng tới thao tác này). Quét các file hosting trong Pages có <b>mtime sau</b> mốc thời gian dưới đây, so sánh với local, rồi hiện kết quả trong bảng bên dưới với mọi dòng đã mặc định sẵn "Use Hosting version" (vẫn có thể đổi từng dòng trước khi sync).</p>
             <label class="sc-modal-field">
                 Mốc thời gian (chỉ lấy file hosting sửa SAU mốc này):
@@ -1132,13 +1132,13 @@
         });
     });
 
-    /** Mặc định mở modal "Pull from Hosting" với mốc = 1 ngày trước thời điểm hiện tại — cùng lý do với defaultPushLocalSince(). */
+    /** Mặc định mở modal "Pull Pages from Hosting" với mốc = 1 ngày trước thời điểm hiện tại — cùng lý do với defaultPushLocalSince(). */
     function defaultPullHostingSince() {
         return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
     }
 
     /**
-     * "Pull from Hosting": luôn chỉ áp dụng cho Pages (Category tick ở trên
+     * "Pull Pages from Hosting": luôn chỉ áp dụng cho Pages (Category tick ở trên
      * không ảnh hưởng tới thao tác này — xem startPullHostingJob() trong
      * SyncManager.php), là ảnh ngược của "Cleanup Hosting"/"Push from Local".
      * Hỏi mốc mtime qua modal, rồi CHỈ quét hosting (lọc theo mtime ngay tại
@@ -1174,7 +1174,7 @@
         pullHostingModal.style.display = 'none';
         cleanupSummary.style.display = 'none';
 
-        setStatus('Checking (Pull from Hosting)...', false);
+        setStatus('Checking (Pull Pages from Hosting)...', false);
         checkBtn.disabled = true;
         pullHostingBtn.disabled = true;
         syncBtn.disabled = true;

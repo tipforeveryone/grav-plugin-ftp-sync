@@ -150,7 +150,7 @@ function defaultCleanupHostingSince() {
     return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
 }
 
-/** Default the "Pull from Hosting" modal to 1 day before the current time — same rationale as defaultPushLocalSince(). */
+/** Default the "Pull Pages from Hosting" modal to 1 day before the current time — same rationale as defaultPushLocalSince(). */
 function defaultPullHostingSince() {
     return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
 }
@@ -235,7 +235,7 @@ class FtpSyncPage extends HTMLElement {
                     <button type="button" class="fts-btn" data-action="check-diff" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-refresh"></i> Check differences</button>
                     <button type="button" class="fts-btn" data-action="push-local" ${this._isEnabled ? '' : 'disabled'} title="Only scans LOCAL files with mtime after a chosen point in time, then compares just those against Hosting — faster than 'Check differences' when only a few files changed in a large tree."><i class="fa fa-upload"></i> Push from Local</button>
                     <button type="button" class="fts-btn" data-action="cleanup-hosting" ${this._isEnabled ? '' : 'disabled'} title="Only scans HOSTING files with mtime after a chosen point in time, and lists ones that no longer exist on Local — useful for removing leftover files after renaming/deleting content locally."><i class="fa fa-trash"></i> Cleanup Hosting</button>
-                    <button type="button" class="fts-btn" data-action="pull-hosting" ${this._isEnabled ? '' : 'disabled'} title="Only applies to Pages. Scans HOSTING pages with mtime after a chosen point in time, compares them against Local, and defaults every row to 'Use Hosting version' — for pulling content edited directly on Hosting back down to Local."><i class="fa fa-download"></i> Pull from Hosting</button>
+                    <button type="button" class="fts-btn" data-action="pull-hosting" ${this._isEnabled ? '' : 'disabled'} title="Only applies to Pages. Scans HOSTING pages with mtime after a chosen point in time, compares them against Local, and defaults every row to 'Use Hosting version' — for pulling content edited directly on Hosting back down to Local."><i class="fa fa-download"></i> Pull Pages from Hosting</button>
                     <button type="button" class="fts-btn" data-action="full-deploy" ${this._isEnabled && this._isLocal ? '' : 'disabled'} title="Bundles the ENTIRE site into one .zip. Deleting old files on hosting and uploading is up to you."><i class="fa fa-rocket"></i> Compress full site</button>
                     <button type="button" class="fts-btn" data-action="mark-synced" style="display:none" ${this._isLocal ? '' : 'disabled'} title="Click ONLY after you have manually uploaded and extracted this zip on Hosting."><i class="fa fa-check"></i> Mark as deployed</button>
                     <button type="button" class="fts-btn" data-action="show-backups" ${this._isEnabled ? '' : 'disabled'}><i class="fa fa-archive"></i> Show backups</button>
@@ -278,7 +278,7 @@ class FtpSyncPage extends HTMLElement {
 
             <div class="fts-modal-overlay" data-modal="pull-hosting" style="display:none">
                 <div class="fts-modal-box">
-                    <h3><i class="fa fa-download"></i> Pull from Hosting</h3>
+                    <h3><i class="fa fa-download"></i> Pull Pages from Hosting</h3>
                     <p>Only applies to <b>Pages</b> (the Category selection above is ignored for this action). Scans Hosting Pages files with <b>mtime after</b> the point in time below, compares them against Local, and lists the result in the table below with every row already set to "Use Hosting version" (you can still change individual rows before syncing).</p>
                     <label class="fts-modal-field">
                         Since (only hosting files modified AFTER this):
@@ -708,7 +708,7 @@ class FtpSyncPage extends HTMLElement {
     }
 
     /**
-     * "Pull from Hosting": always scoped to Pages only (see startPullHostingJob()
+     * "Pull Pages from Hosting": always scoped to Pages only (see startPullHostingJob()
      * in SyncManager.php — the Category selection above has no effect on this
      * action), the mirror image of "Push from Local" and reusing the same
      * mtime-modal + results-table + "Sync now" flow. Only scans Hosting
@@ -733,7 +733,7 @@ class FtpSyncPage extends HTMLElement {
         const pullHostingBtn = this._q('[data-action="pull-hosting"]');
         const syncBtn = this._q('[data-action="sync-now"]');
         this._q('.fts-cleanup-summary').style.display = 'none';
-        this._setStatus('Checking (Pull from Hosting)...', false);
+        this._setStatus('Checking (Pull Pages from Hosting)...', false);
         checkBtn.disabled = true;
         pullHostingBtn.disabled = true;
         syncBtn.disabled = true;
