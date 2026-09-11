@@ -120,6 +120,25 @@ class FtpSyncApiController extends AbstractApiController
         return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->stepCleanupHostingJob($jobId)));
     }
 
+    public function startPullHosting(ServerRequestInterface $request): ResponseInterface
+    {
+        $this->guard($request);
+
+        $body = $this->getRequestBody($request);
+        $sinceMtime = (int) ($body['since_mtime'] ?? 0);
+
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->startPullHostingJob($sinceMtime)));
+    }
+
+    public function stepPullHosting(ServerRequestInterface $request): ResponseInterface
+    {
+        $this->guard($request);
+
+        $jobId = (string) $this->getRouteParam($request, 'jobId');
+
+        return ApiResponse::create($this->run(fn (SyncManager $sm) => $sm->stepPullHostingJob($jobId)));
+    }
+
     public function startSync(ServerRequestInterface $request): ResponseInterface
     {
         $this->guard($request);

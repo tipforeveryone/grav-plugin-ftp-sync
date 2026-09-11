@@ -98,6 +98,9 @@ class FTPSyncPlugin extends Plugin
             $group->post('/cleanup-hosting', [$controller, 'startCleanupHosting']);
             $group->post('/cleanup-hosting/{jobId}/step', [$controller, 'stepCleanupHosting']);
 
+            $group->post('/pull-hosting', [$controller, 'startPullHosting']);
+            $group->post('/pull-hosting/{jobId}/step', [$controller, 'stepPullHosting']);
+
             $group->post('/sync', [$controller, 'startSync']);
             $group->post('/sync/{jobId}/step', [$controller, 'stepSync']);
 
@@ -275,6 +278,12 @@ HTML;
         } elseif ($task === 'ftpsynccleanupstep') {
             $event->stopPropagation();
             $this->handleCleanupHostingStep($controller->post ?? []);
+        } elseif ($task === 'ftpsyncpullhostingstart') {
+            $event->stopPropagation();
+            $this->handlePullHostingStart($controller->post ?? []);
+        } elseif ($task === 'ftpsyncpullhostingstep') {
+            $event->stopPropagation();
+            $this->handlePullHostingStep($controller->post ?? []);
         } elseif ($task === 'ftpsyncsyncstart') {
             $event->stopPropagation();
             $this->handleSyncStart($controller->post ?? []);
@@ -399,6 +408,40 @@ HTML;
 
         try {
             $result = $this->syncManager()->stepCleanupHostingJob($jobId);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 1/2 của "Pull from Hosting": xây hàng đợi group cần quét remote, trả về job_id + tổng số để UI vẽ progress bar. */
+    private function handlePullHostingStart(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $sinceMtime = (int) ($post['since_mtime'] ?? 0);
+
+        try {
+            $result = $this->syncManager()->startPullHostingJob($sinceMtime);
+            $this->grav['admin']->json_response = ['status' => 'success'] + $result;
+        } catch (\Throwable $e) {
+            $this->jsonError($e->getMessage());
+        }
+    }
+
+    /** Bước 2/2: xử lý 1 group (quét remote) của job "Pull from Hosting" — UI gọi lặp lại tới khi finished=true. */
+    private function handlePullHostingStep(array $post): void
+    {
+        if (!$this->guardRequest()) {
+            return;
+        }
+
+        $jobId = (string) ($post['job_id'] ?? '');
+
+        try {
+            $result = $this->syncManager()->stepPullHostingJob($jobId);
             $this->grav['admin']->json_response = ['status' => 'success'] + $result;
         } catch (\Throwable $e) {
             $this->jsonError($e->getMessage());

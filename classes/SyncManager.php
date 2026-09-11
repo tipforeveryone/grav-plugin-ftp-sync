@@ -582,6 +582,157 @@ class SyncManager
     }
 
     /**
+     * Bước 1/2 của "Pull from Hosting": chuẩn bị hàng đợi group để quét
+     * REMOTE (giống pha 'scan' của "Cleanup Hosting") — luôn chỉ áp dụng cho
+     * group 'pages' (bất kể Category nào đang được tick trên UI), vì đây là
+     * tính năng dành riêng cho Pages theo yêu cầu, đối xứng với "Cleanup
+     * Hosting" nhưng NGƯỢC HƯỚNG: tìm file có trên HOSTING để kéo VỀ local,
+     * thay vì tìm file thừa trên hosting để xoá.
+     *
+     * @param int $sinceMtime Unix timestamp — chỉ xét file HOSTING có mtime > mốc này
+     *                        (tránh phải liệt kê toàn bộ cây hosting mỗi lần).
+     * @return array{job_id:string, total:int, label:string}
+     */
+    public function startPullHostingJob(int $sinceMtime): array
+    {
+        $groups = $this->resolveGroups(['pages']);
+        if (empty($groups)) {
+            throw new \RuntimeException('No content selected to sync.');
+        }
+
+        $jobId = bin2hex(random_bytes(8));
+        $job = [
+            'id' => $jobId,
+            'groups' => $groups,
+            'scan_queue' => array_keys($groups),
+            'scan_total' => count($groups),
+            'scan_done' => 0,
+            'since_mtime' => $sinceMtime,
+            'local' => [],
+            'remote' => [],
+            'files' => [],
+            'rows' => [],
+            'baseline' => $this->loadBaseline(),
+        ];
+        $this->saveJson($this->dataDir . '/pull-hosting-job.json', $job);
+
+        return ['job_id' => $jobId, 'total' => $job['scan_total'], 'label' => 'Scanning'];
+    }
+
+    /**
+     * Bước 2/2 của "Pull from Hosting": quét REMOTE đệ quy ĐÚNG 1 group còn
+     * lại trong scan_queue (network round-trip, giống stepCleanupHostingJob()),
+     * giữ path có mtime hosting > since_mtime, rồi stat LOCAL cho từng path đó
+     * (rẻ — cùng máy, không cần round-trip FTP) và diff ngay bằng DiffEngine
+     * (giống stepPushFromLocalJob(), nhưng theo chiều ngược lại: nguồn liệt kê
+     * là remote, không phải local). Vì mọi path xét ở đây đều lấy từ remote đã
+     * quét được, kết quả chỉ có thể là 'missing_local' (hosting có, local
+     * chưa có) hoặc 'changed' — không bao giờ có 'missing_remote'.
+     *
+     * Gọi lặp lại tới khi finished=true; khi xong, ghi kết quả vào
+     * last-diff.json giống hệt "Cleanup Hosting"/"Push from Local" để nút
+     * "Sync now" hiện có tái sử dụng được nguyên vẹn — mỗi dòng mặc định
+     * chọn "Use Hosting version" ở UI (forceResolution='remote'), nhưng vẫn
+     * có thể đổi từng dòng như bảng "Check differences" thông thường.
+     *
+     * @return array{done:int,total:int,finished:bool,label:string,groups?:array<string,string>,rows?:array<string,array{type:string}>}
+     */
+    public function stepPullHostingJob(string $jobId, int $batchSize = self::BATCH_SIZE): array
+    {
+        $job = $this->loadJson($this->dataDir . '/pull-hosting-job.json');
+        if ($job === null || ($job['id'] ?? null) !== $jobId) {
+            throw new \RuntimeException('No such pull job (it may have finished, been cancelled, or expired).');
+        }
+
+        $groupKey = array_shift($job['scan_queue']);
+        $group = $job['groups'][$groupKey];
+
+        $scanner = new FileScanner($this->ignorePatterns());
+        $ftp = new FtpClient();
+        $this->connectFtp($ftp);
+
+        $local = $job['local'];
+        $remote = $job['remote'];
+        $files = $job['files'];
+        $rows = $job['rows'];
+
+        try {
+            $remoteFiles = $ftp->scan($group['remote'], [$scanner, 'isIgnored']);
+
+            $localBatch = [];
+            $remoteBatch = [];
+            foreach ($remoteFiles as $relPath => $stat) {
+                if ($stat['mtime'] <= $job['since_mtime']) {
+                    continue;
+                }
+
+                $path = $groupKey . '/' . $relPath;
+                $localFile = rtrim($group['local'], '/') . '/' . $relPath;
+                $remoteFile = rtrim($group['remote'], '/') . '/' . $relPath;
+                $files[$path] = ['local' => $localFile, 'remote' => $remoteFile];
+
+                $remote[$path] = $stat;
+                $remoteBatch[$path] = $stat;
+
+                $localStat = $this->statLocal($localFile);
+                if ($localStat !== null) {
+                    $local[$path] = $localStat;
+                    $localBatch[$path] = $localStat;
+                }
+            }
+
+            $rows += (new DiffEngine())->diff($localBatch, $remoteBatch, function (string $path) use ($files, $ftp): bool {
+                return $this->sameSizeContentDiffers($files[$path]['local'], $files[$path]['remote'], $ftp);
+            });
+        } finally {
+            $ftp->close();
+        }
+
+        $job['local'] = $local;
+        $job['remote'] = $remote;
+        $job['files'] = $files;
+        $job['rows'] = $rows;
+        $job['scan_done']++;
+        $finished = empty($job['scan_queue']);
+
+        if ($finished) {
+            $state = [
+                'groups' => $job['groups'],
+                'local' => $local,
+                'remote' => $remote,
+                'baseline' => $job['baseline'],
+                'rows' => $rows,
+                'checked_at' => time(),
+            ];
+            $this->saveJson($this->dataDir . '/last-diff.json', $state);
+            @unlink($this->dataDir . '/pull-hosting-job.json');
+
+            $groupLabels = [];
+            foreach ($job['groups'] as $key => $group) {
+                $groupLabels[$key] = $group['label'];
+            }
+
+            return [
+                'done' => $job['scan_done'],
+                'total' => $job['scan_total'],
+                'finished' => true,
+                'label' => 'Scanning',
+                'groups' => $groupLabels,
+                'rows' => $rows,
+            ];
+        }
+
+        $this->saveJson($this->dataDir . '/pull-hosting-job.json', $job);
+
+        return [
+            'done' => $job['scan_done'],
+            'total' => $job['scan_total'],
+            'finished' => false,
+            'label' => 'Scanning',
+        ];
+    }
+
+    /**
      * Bước 1/2 của "Full deploy to hosting": BỎ QUA hoàn toàn checkbox và
      * sync_plugins — tự quét TOÀN BỘ GRAV_ROOT, loại trừ đúng những gì
      * không ảnh hưởng tới việc site chạy được (xem FULL_DEPLOY_*_EXCLUDE).

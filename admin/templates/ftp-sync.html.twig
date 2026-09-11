@@ -389,6 +389,10 @@
                         title="Chỉ quét các file HOSTING có mtime sau 1 mốc thời gian bạn chọn, rồi liệt kê những file không còn tồn tại ở local — dùng để dọn rác trên hosting sau khi đổi tên/xoá nội dung ở local.">
                     <i class="fa fa-trash"></i> Cleanup Hosting
                 </button>
+                <button type="button" class="button" id="sc-pull-hosting" {{ sync_enabled ? '' : 'disabled' }}
+                        title="Chỉ áp dụng cho Pages. Quét các trang HOSTING có mtime sau 1 mốc thời gian bạn chọn, so sánh với Local, và mặc định mọi dòng là 'Use Hosting version' — dùng để kéo nội dung vừa sửa trực tiếp trên Hosting về lại Local.">
+                    <i class="fa fa-download"></i> Pull from Hosting
+                </button>
                 <button type="button" class="button" id="sc-full-deploy" {{ sync_enabled ? '' : 'disabled' }}
                         title="Ignores the categories above — bundles the ENTIRE site (minus dev-only files) into one .zip in user/data/ftp-sync/. Deleting old files on hosting and uploading the zip are up to you.">
                     <i class="fa fa-rocket"></i> Compress full site
@@ -443,6 +447,21 @@
             <div class="sc-modal-actions">
                 <button type="button" class="button" id="sc-cleanup-hosting-cancel">Cancel</button>
                 <button type="button" class="button primary" id="sc-cleanup-hosting-run">Run</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="sc-pull-hosting-modal" class="sc-modal-overlay" style="display:none">
+        <div class="sc-modal-box">
+            <h3><i class="fa fa-download"></i> Pull from Hosting</h3>
+            <p>Chỉ áp dụng cho <b>Pages</b> (Category đã tick ở trên không ảnh hưởng tới thao tác này). Quét các file hosting trong Pages có <b>mtime sau</b> mốc thời gian dưới đây, so sánh với local, rồi hiện kết quả trong bảng bên dưới với mọi dòng đã mặc định sẵn "Use Hosting version" (vẫn có thể đổi từng dòng trước khi sync).</p>
+            <label class="sc-modal-field">
+                Mốc thời gian (chỉ lấy file hosting sửa SAU mốc này):
+                <input type="datetime-local" id="sc-pull-hosting-since">
+            </label>
+            <div class="sc-modal-actions">
+                <button type="button" class="button" id="sc-pull-hosting-cancel">Cancel</button>
+                <button type="button" class="button primary" id="sc-pull-hosting-run">Run</button>
             </div>
         </div>
     </div>
@@ -576,6 +595,11 @@
     var cleanupHostingSinceInput = document.getElementById('sc-cleanup-hosting-since');
     var cleanupHostingCancelBtn = document.getElementById('sc-cleanup-hosting-cancel');
     var cleanupHostingRunBtn = document.getElementById('sc-cleanup-hosting-run');
+    var pullHostingBtn = document.getElementById('sc-pull-hosting');
+    var pullHostingModal = document.getElementById('sc-pull-hosting-modal');
+    var pullHostingSinceInput = document.getElementById('sc-pull-hosting-since');
+    var pullHostingCancelBtn = document.getElementById('sc-pull-hosting-cancel');
+    var pullHostingRunBtn = document.getElementById('sc-pull-hosting-run');
     var syncBtn = document.getElementById('sc-sync-now');
     var cleanupSummary = document.getElementById('sc-cleanup-summary');
     var cleanupSummaryText = document.getElementById('sc-cleanup-summary-text');
@@ -1105,6 +1129,84 @@
             setStatus('Error: ' + e, true);
             checkBtn.disabled = false;
             cleanupHostingBtn.disabled = false;
+        });
+    });
+
+    /** Mặc định mở modal "Pull from Hosting" với mốc = 1 ngày trước thời điểm hiện tại — cùng lý do với defaultPushLocalSince(). */
+    function defaultPullHostingSince() {
+        return toDatetimeLocalValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
+    }
+
+    /**
+     * "Pull from Hosting": luôn chỉ áp dụng cho Pages (Category tick ở trên
+     * không ảnh hưởng tới thao tác này — xem startPullHostingJob() trong
+     * SyncManager.php), là ảnh ngược của "Cleanup Hosting"/"Push from Local".
+     * Hỏi mốc mtime qua modal, rồi CHỈ quét hosting (lọc theo mtime ngay tại
+     * server), so sánh từng file với local — dùng chung bảng kết quả + nút
+     * "Sync now" hiện có, nhưng ép sẵn mọi dòng về "Use Hosting version"
+     * (đây là tính năng kéo hosting về, không cần người dùng tự chọn hướng
+     * cho từng dòng, dù vẫn có thể đổi lại từng dòng nếu muốn).
+     */
+    pullHostingBtn.addEventListener('click', function () {
+        pullHostingSinceInput.value = defaultPullHostingSince();
+        pullHostingModal.style.display = 'flex';
+        pullHostingSinceInput.focus();
+    });
+
+    pullHostingCancelBtn.addEventListener('click', function () {
+        pullHostingModal.style.display = 'none';
+    });
+
+    pullHostingModal.addEventListener('click', function (e) {
+        if (e.target === pullHostingModal) {
+            pullHostingModal.style.display = 'none';
+        }
+    });
+
+    pullHostingRunBtn.addEventListener('click', function () {
+        if (!pullHostingSinceInput.value) {
+            alert('Chọn mốc thời gian trước.');
+            return;
+        }
+
+        var sinceMtime = Math.floor(new Date(pullHostingSinceInput.value).getTime() / 1000);
+        lastKinds = ['pages'];
+        pullHostingModal.style.display = 'none';
+        cleanupSummary.style.display = 'none';
+
+        setStatus('Checking (Pull from Hosting)...', false);
+        checkBtn.disabled = true;
+        pullHostingBtn.disabled = true;
+        syncBtn.disabled = true;
+
+        var fields = [['since_mtime', String(sinceMtime)]];
+
+        post('ftpsyncpullhostingstart', fields).then(function (data) {
+            if (data.status !== 'success') {
+                setStatus('Error: ' + (data.message || 'unknown'), true);
+                checkBtn.disabled = false;
+                pullHostingBtn.disabled = false;
+                return;
+            }
+
+            showProgress(0, data.total, data.label || 'Scanning');
+            runBatchedJob('ftpsyncpullhostingstep', data.job_id, 'Scanning', function (finalData) {
+                checkBtn.disabled = false;
+                pullHostingBtn.disabled = false;
+                renderRows(finalData.rows || {}, {
+                    forceResolution: 'remote',
+                    emptyMessage: 'No hosting pages modified after the selected time.'
+                });
+                syncBtn.disabled = !isLocal || !hasSyncableContent(finalData.rows || {});
+            }, function (message) {
+                setStatus('Error: ' + message, true);
+                checkBtn.disabled = false;
+                pullHostingBtn.disabled = false;
+            });
+        }).catch(function (e) {
+            setStatus('Error: ' + e, true);
+            checkBtn.disabled = false;
+            pullHostingBtn.disabled = false;
         });
     });
 
